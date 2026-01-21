@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import plotly.graph_objects as go
 from datetime import datetime
 import pytz
+import textwrap # HTML 들여쓰기 제거용
 
 # -------------------------------------------------------------------
 # 1. 초기 설정 (Config)
@@ -14,7 +15,7 @@ st.set_page_config(page_title="Investment Strategy Command", layout="wide", page
 
 # [상수 설정]
 BENCHMARK_RATE = 0.035  # 비교군: 예금 금리 3.5%
-# 정렬 우선순위 (JEPQ 추가 완료)
+# 정렬 우선순위
 TICKER_PRIORITY = ['💵 USD CASH', 'O', 'PLD', 'SCHD', 'JEPI', 'JEPQ', 'KO', 'MSFT', 'GOOGL', 'NVDA', 'TSLA', 'AMD']
 
 # -------------------------------------------------------------------
@@ -48,30 +49,34 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def get_market_data(tickers):
-    """ 야후 파이낸스에서 현재가 및 환율 일괄 조회 """
+    """ 
+    [수정] 야후 파이낸스 데이터 호출 로직 개선 
+    - 일괄 호출(download) 대신 개별 호출(Ticker) 사용하여 안정성 확보
+    - 실패 시 '0'이 아니라 아예 딕셔너리에 넣지 않음 (그래야 본전으로 처리됨)
+    """
     data_map = {}
-    try:
-        fx = yf.Ticker("USDKRW=X").history(period="1d")['Close'].iloc[-1]
-    except:
-        fx = 1450.0 # Fallback
+    fx = 1450.0 # Default Fallback
 
+    # 1. 환율 조회
+    try:
+        fx_data = yf.Ticker("USDKRW=X").history(period="1d")
+        if not fx_data.empty:
+            fx = fx_data['Close'].iloc[-1]
+    except:
+        pass # 실패하면 1450 유지
+
+    # 2. 주가 조회
     if tickers:
-        try:
-            valid_tickers = [t for t in tickers if t != '💵 USD CASH']
-            if valid_tickers:
-                tickers_str = " ".join(valid_tickers)
-                df = yf.download(tickers_str, period="1d", progress=False)['Close']
-                if len(valid_tickers) == 1:
-                    data_map[valid_tickers[0]] = df.iloc[-1]
-                else:
-                    for t in valid_tickers:
-                        try:
-                            val = df[t].iloc[-1]
-                            data_map[t] = val
-                        except:
-                            data_map[t] = 0
-        except:
-            pass
+        valid_tickers = [t for t in tickers if t != '💵 USD CASH']
+        for t in valid_tickers:
+            try:
+                # 개별 호출이 속도는 조금 느려도 훨씬 안전함
+                hist = yf.Ticker(t).history(period="1d")
+                if not hist.empty:
+                    data_map[t] = hist['Close'].iloc[-1]
+            except:
+                pass # 실패하면 map에 추가 안 함 -> 나중에 매수가(Avg Price)를 사용하게 됨
+
     return fx, data_map
 
 # -------------------------------------------------------------------
@@ -99,7 +104,7 @@ with st.sidebar:
 try:
     trade_df, exchange_df, krw_assets_df, etf_df, div_df = load_data()
     
-    # 1. 전처리 (숫자 변환)
+    # 전처리
     if not exchange_df.empty:
         exchange_df['USD_Amount'] = clean_currency(exchange_df['USD_Amount'])
         exchange_df['KRW_Amount'] = clean_currency(exchange_df['KRW_Amount'])
@@ -151,8 +156,10 @@ try:
             avg_buy_rate = principal_krw / principal_usd if principal_usd else 0
             avg_buy_price = principal_usd / qty
 
-            cur_price = price_map.get(ticker, avg_buy_price)
-            if pd.isna(cur_price): cur_price = avg_buy_price
+            # [수정] 데이터 없으면(0) 매수가(avg_buy_price)를 사용해 수익률 0%로 만듦 (전손 방지)
+            cur_price = price_map.get(ticker)
+            if cur_price is None or cur_price == 0:
+                cur_price = avg_buy_price
             
             eval_usd = qty * cur_price
             eval_krw = eval_usd * current_rate
@@ -192,11 +199,10 @@ try:
     etf_rows = []
     if not etf_df.empty:
         for _, row in etf_df.iterrows():
-            # ETF도 소수점 등 숫자처리 확실하게
             qty = float(row['Qty'])
             price = float(row['Price_KRW'])
             eval_v = qty * price 
-            princ_v = qty * price # 임시
+            princ_v = qty * price
             prof = eval_v - princ_v
             
             if show_tax and prof > 2000000:
@@ -205,19 +211,13 @@ try:
     df_etf_res = pd.DataFrame(etf_rows)
 
     # -------------------------------------------------------------------
-    # 5. UI 렌더링 - 표시용 데이터프레임 생성 (한글화 & 반올림)
+    # 5. UI 렌더링
     # -------------------------------------------------------------------
     
-    # 탭이나 차트에 쓸 데이터는 미리 소수점 2자리로 정리해서 만듭니다.
-    # 이렇게 해야 '미국 주식 원본' 탭에서도 한글+소수점 정리가 적용됩니다.
-    
     df_display = df_combined.copy()
-    
-    # 정렬 (JEPQ 등 우선순위 반영)
     df_display['SortKey'] = df_display['Ticker'].apply(lambda x: TICKER_PRIORITY.index(x) if x in TICKER_PRIORITY else 999)
     df_display = df_display.sort_values(['SortKey', 'Ticker']).drop(columns=['SortKey'])
     
-    # 한글 컬럼명 변경 (탭 표시용)
     rename_map = {
         'Ticker': '종목코드', 'Name': '종목명', 'Qty': '수량',
         'Principal': '투자원금', 'Eval': '평가금액',
@@ -227,11 +227,7 @@ try:
     }
     df_display_kr = df_display.rename(columns=rename_map)
 
-    # -------------------------------------------------------------------
-    # 6. 화면 구성 (Visual Presentation)
-    # -------------------------------------------------------------------
-    
-    # A. KPI Section
+    # A. KPI
     total_principal = df_combined['Principal'].sum()
     grand_total_profit = df_combined['Total_Profit'].sum()
     total_return_rate = (grand_total_profit / total_principal * 100) if total_principal else 0
@@ -250,7 +246,7 @@ try:
     with col_kpi3:
         st.metric("현재 시장 환율", f"{current_rate:,.2f}원", "실시간 적용")
 
-    # B. Sector Analysis
+    # B. Sector
     st.subheader("⚖️ 포트폴리오 밸런스 (Sector PnL)")
     dividend_tickers = ['O', 'PLD', 'SCHD', 'JEPI', 'JEPQ', 'KO']
     tech_tickers = ['MSFT', 'GOOGL', 'NVDA', 'TSLA', 'AMD']
@@ -270,39 +266,14 @@ try:
     fig_bar.add_vline(x=0, line_width=1, line_color="gray")
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # C. Main Table (HTML Custom Render)
+    # C. Main Table (HTML Fix: dedent & strip)
     st.subheader("📑 해외자산 통합 현황")
     
-    # HTML 생성시에는 원본 df_display(영어 컬럼 키)를 사용하되, 표시는 커스텀
     def make_html_table(df):
-        html = """
-        <style>
-            table {width: 100%; border-collapse: collapse; font-size: 0.95em; color: #333;}
-            th {background-color: #f0f2f6; color: #000; padding: 10px; text-align: right; border-bottom: 2px solid #ddd;}
-            td {padding: 8px; text-align: right; border-bottom: 1px solid #eee; vertical-align: middle;}
-            .left {text-align: left;}
-            .sub {font-size: 0.8em; color: gray; display: block;}
-            .red {color: #D32F2F; font-weight: bold;}
-            .blue {color: #1976D2; font-weight: bold;}
-            .zero {color: #ccc;}
-        </style>
-        <table>
-            <thead>
-                <tr>
-                    <th class="left">종목 (Name)</th>
-                    <th>주가손익 (수익률)</th>
-                    <th>환손익 (노출도)</th>
-                    <th>배당수익</th>
-                    <th>합계손익 (ROI)</th>
-                    <th>매수 / BEP / 안전마진</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        
+        # [수정] 들여쓰기 문제를 해결하기 위해 textwrap.dedent 사용
+        rows_html = ""
         for _, row in df.iterrows():
             def color_val(val, sub_val=None):
-                # 콤마 및 소수점 2자리 강제 적용
                 if val > 0: 
                     c = "red"; s = "+"
                     main_txt = f'<span class="{c}">{s}{val:,.0f}</span>'
@@ -335,7 +306,7 @@ try:
                 margin_color = "green" if margin_val > 0 else "red"
                 margin_cell = f"{row['Buy_Rate']:,.1f} / {row['BE_Rate']:,.1f} / <b style='color:{margin_color}'>{margin_val:+.1f}</b>"
 
-            html += f"""
+            rows_html += f"""
                 <tr>
                     <td class="left">{name_cell}</td>
                     <td>{price_cell}</td>
@@ -352,18 +323,43 @@ try:
         t_t = df['Total_Profit'].sum()
         t_r = t_t / df['Principal'].sum() * 100 if df['Principal'].sum() else 0
         
-        html += f"""
-            <tr style="background-color: #fafafa; font-weight: bold;">
-                <td class="left">🔴 TOTAL</td>
-                <td>{t_p:,.0f}</td>
-                <td>{t_f:,.0f}</td>
-                <td>{t_d:,.0f}</td>
-                <td>{t_t:,.0f}<br><span class="sub">({t_r:+.2f}%)</span></td>
-                <td>-</td>
-            </tr>
-            </tbody></table>
+        # [수정] HTML 구조 단순화 (들여쓰기 제거)
+        html_content = f"""
+        <style>
+            table {{width: 100%; border-collapse: collapse; font-size: 0.95em; color: #333;}}
+            th {{background-color: #f0f2f6; color: #000; padding: 10px; text-align: right; border-bottom: 2px solid #ddd;}}
+            td {{padding: 8px; text-align: right; border-bottom: 1px solid #eee; vertical-align: middle;}}
+            .left {{text-align: left;}}
+            .sub {{font-size: 0.8em; color: gray; display: block;}}
+            .red {{color: #D32F2F; font-weight: bold;}}
+            .blue {{color: #1976D2; font-weight: bold;}}
+            .zero {{color: #ccc;}}
+        </style>
+        <table>
+            <thead>
+                <tr>
+                    <th class="left">종목 (Name)</th>
+                    <th>주가손익 (수익률)</th>
+                    <th>환손익 (노출도)</th>
+                    <th>배당수익</th>
+                    <th>합계손익 (ROI)</th>
+                    <th>매수 / BEP / 안전마진</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+                <tr style="background-color: #fafafa; font-weight: bold;">
+                    <td class="left">🔴 TOTAL</td>
+                    <td>{t_p:,.0f}</td>
+                    <td>{t_f:,.0f}</td>
+                    <td>{t_d:,.0f}</td>
+                    <td>{t_t:,.0f}<br><span class="sub">({t_r:+.2f}%)</span></td>
+                    <td>-</td>
+                </tr>
+            </tbody>
+        </table>
         """
-        return html
+        return textwrap.dedent(html_content)
 
     st.markdown(make_html_table(df_display), unsafe_allow_html=True)
 
@@ -374,8 +370,6 @@ try:
     tab1, tab2, tab3 = st.tabs(["🇺🇸 미국 주식 상세", "🇰🇷 국내 ETF (ISA)", "🏦 예금/공제"])
     
     with tab1:
-        # [수정] 한글 컬럼명 & 반올림된 데이터프레임 표시
-        # 숫자 포맷팅 적용 (문자로 변환하지 않고 st.column_config 활용도 가능하지만 여기선 직관적으로)
         st.dataframe(
             df_display_kr.style.format("{:,.2f}", subset=['수량','투자원금','평가금액','주가손익','환손익','배당수익','합계손익','매수환율','손익분기','안전마진']),
             use_container_width=True, hide_index=True
