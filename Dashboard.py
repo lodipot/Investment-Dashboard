@@ -8,13 +8,60 @@ import pytz
 import textwrap
 
 # -------------------------------------------------------------------
-# 1. 초기 설정 (Config)
+# 1. 초기 설정 & 스타일링
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Investment Strategy Command", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Investment Strategy Command", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
+
+# [CSS] 탭바 고정 & 카드 스타일 & 버튼 수정
+st.markdown("""
+<style>
+    /* 1. 탭바 상단 고정 (Sticky Tab Bar) */
+    .stTabs [data-baseweb="tab-list"] {
+        position: sticky;
+        top: 0; /* 상단에서 0px 위치에 고정 */
+        z-index: 999; /* 다른 요소보다 위에 표시 */
+        background-color: white; /* 배경색 지정 (투명 방지) */
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+        box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); /* 그림자 효과 */
+    }
+    
+    /* 2. 정사각형 큐브 카드 (Cube Card) */
+    .cube-card {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        border-radius: 12px;
+        padding: 15px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        height: 100%; /* 높이 꽉 채우기 */
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+    }
+    .cube-title { font-size: 0.9rem; color: #6c757d; margin-bottom: 5px; font-weight: 600; }
+    .cube-value { font-size: 1.2rem; font-weight: 800; color: #212529; margin-bottom: 2px; }
+    .cube-sub { font-size: 0.8rem; font-weight: 500; }
+    
+    /* 3. 모바일 버튼 깨짐 방지 */
+    div[data-testid="stPopover"] > button {
+        width: 100%;
+        height: 40px;
+        border: 1px solid #dee2e6;
+        background-color: white;
+    }
+    
+    /* 색상 유틸리티 */
+    .text-red { color: #D32F2F !important; }
+    .text-blue { color: #1976D2 !important; }
+    .text-gray { color: #adb5bd !important; }
+    .text-green { color: #2E7D32 !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # [상수 설정]
 BENCHMARK_RATE = 0.035
-# 섹터 분류 정의
 SECTORS = {
     'REITS': {'emoji': '🏢', 'name': '리츠 & 부동산', 'tickers': ['O', 'PLD']},
     'DVD_DEF': {'emoji': '💰', 'name': '배당 & 방어주', 'tickers': ['SCHD', 'JEPI', 'JEPQ', 'KO']},
@@ -22,9 +69,10 @@ SECTORS = {
     'VOL_TECH': {'emoji': '🚀', 'name': '혁신테크 (Volatile)', 'tickers': ['NVDA', 'TSLA', 'AMD']},
     'CASH': {'emoji': '💵', 'name': '달러 현금', 'tickers': ['💵 USD CASH']}
 }
+SORT_ORDER = ['O', 'PLD', 'JEPI', 'JEPQ', 'KO', 'SCHD', 'GOOGL', 'MSFT', 'AMD', 'NVDA', 'TSLA', '💵 USD CASH']
 
 # -------------------------------------------------------------------
-# 2. 데이터 로드 및 API
+# 2. 데이터 로드
 # -------------------------------------------------------------------
 def clean_currency(series):
     return pd.to_numeric(series.astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -79,18 +127,7 @@ def get_market_data(tickers):
     return fx, fx_status, data_map
 
 # -------------------------------------------------------------------
-# 3. 사이드바
-# -------------------------------------------------------------------
-with st.sidebar:
-    st.header("🎮 Control Tower")
-    korea_tz = pytz.timezone('Asia/Seoul')
-    st.caption(f"Update: {datetime.now(korea_tz).strftime('%H:%M:%S')}")
-    st.info("💡 F5를 누르면 데이터가 갱신됩니다.")
-    st.markdown("---")
-    show_tax = st.toggle("세후 실질 가치 보기", value=False)
-
-# -------------------------------------------------------------------
-# 4. 데이터 가공 (Calculation)
+# 3. 데이터 가공
 # -------------------------------------------------------------------
 try:
     trade_df, exchange_df, krw_assets_df, etf_df, div_df = load_data()
@@ -150,13 +187,6 @@ try:
             total_profit = eval_krw - principal_krw
             fx_profit = principal_usd * (current_rate - avg_buy_rate)
             price_profit = total_profit - fx_profit
-
-            if show_tax:
-                taxable = total_profit + div_krw - 2500000
-                if taxable > 0:
-                    tax = taxable * 0.22
-                    eval_krw -= tax
-                    total_profit -= tax
             
             be_rate = (principal_krw - div_krw) / eval_usd if eval_usd > 0 else 0
             stock_rows.append({
@@ -169,164 +199,129 @@ try:
 
     df_combined = pd.concat([pd.DataFrame([cash_row]), pd.DataFrame(stock_rows)], ignore_index=True)
     
-    # 섹터 정보 매핑
+    # 섹터 정보 & 정렬
     def get_sector(ticker):
         for code, info in SECTORS.items():
             if ticker in info['tickers']: return code
         return 'ETC'
     
     df_combined['Sector'] = df_combined['Ticker'].apply(get_sector)
+    df_combined['SortKey'] = df_combined['Ticker'].apply(lambda x: SORT_ORDER.index(x) if x in SORT_ORDER else 999)
+    df_combined = df_combined.sort_values(['SortKey', 'Ticker']).drop(columns=['SortKey'])
 
     # -------------------------------------------------------------------
-    # 5. UI 출력 (탭 구조)
+    # 4. 화면 출력 (UI)
     # -------------------------------------------------------------------
-    st.title("🚀 Investment Strategy Command")
+    st.title("🚀 ISC") # 제목 간소화
     
-    # 탭 구성 (요청하신 순서대로)
-    tab_kpi, tab_card, tab_html, tab_detail = st.tabs(["📊 KPI 요약", "🗂️ 카드형 현황", "📑 통합 테이블", "📋 세부 내역"])
+    # 탭 구성
+    tab_kpi, tab_card, tab_html, tab_detail = st.tabs(["📊 KPI", "🗂️ 카드", "📑 통합", "📋 세부"])
 
-    # -------------------------------------------------------------------
-    # [TAB 1] KPI 요약
-    # -------------------------------------------------------------------
+    # [TAB 1] KPI 요약 (카드형)
     with tab_kpi:
         total_principal = df_combined['Principal'].sum()
         roi = (df_combined['Total_Profit'].sum() / total_principal * 100) if total_principal else 0
         fx_roi = (df_combined['FX_Profit'].sum() / total_principal * 100) if total_principal else 0
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("총 투자 수익률", f"{roi:+.2f}%", f"{roi - (BENCHMARK_RATE*100):+.2f}%p (vs 예금)")
-        c2.metric("순수 환차익", f"{fx_roi:+.2f}%", "환율 변동 기여분")
-        fx_msg = "실시간" if fx_status == "Live" else "백업"
-        c3.metric(f"현재 환율 ({fx_msg})", f"{current_rate:,.2f}원")
+        kpi_cols = st.columns(3)
+        with kpi_cols[0]:
+            excess = roi - (BENCHMARK_RATE*100)
+            cls = "text-red" if excess > 0 else "text-blue"
+            st.markdown(f"""<div class="cube-card"><div class="cube-title">총 투자 수익률</div><div class="cube-value {cls}">{roi:+.2f}%</div><div class="cube-sub">예금 대비 {excess:+.2f}%p</div></div>""", unsafe_allow_html=True)
+        with kpi_cols[1]:
+            cls = "text-red" if fx_roi > 0 else "text-blue"
+            st.markdown(f"""<div class="cube-card"><div class="cube-title">순수 환차익</div><div class="cube-value {cls}">{fx_roi:+.2f}%</div><div class="cube-sub">환율 변동 효과</div></div>""", unsafe_allow_html=True)
+        with kpi_cols[2]:
+            fx_msg = "실시간" if fx_status == "Live" else "백업"
+            st.markdown(f"""<div class="cube-card"><div class="cube-title">현재 환율 ({fx_msg})</div><div class="cube-value">{current_rate:,.2f}원</div><div class="cube-sub">USD/KRW</div></div>""", unsafe_allow_html=True)
 
-    # -------------------------------------------------------------------
-    # [TAB 2] 해외자산 통합 현황 (카드형)
-    # -------------------------------------------------------------------
+    # [TAB 2] 카드형 현황
     with tab_card:
-        # 섹터별 중간 점검 (요약 카드)
-        st.subheader("📌 섹터별 요약")
+        # 섹터별 요약
+        st.caption("📌 섹터별 현황")
         sec_cols = st.columns(len(SECTORS))
         for i, (code, info) in enumerate(SECTORS.items()):
             sec_df = df_combined[df_combined['Sector'] == code]
             sec_profit = sec_df['Total_Profit'].sum()
+            sec_roi = sec_profit / sec_df['Principal'].sum() * 100 if sec_df['Principal'].sum() else 0
             
             with sec_cols[i]:
-                # 섹터 요약 카드 HTML
-                bg_color = "#f9f9f9"
-                if sec_profit > 0: txt_color = "#D32F2F" # Red
-                elif sec_profit < 0: txt_color = "#1976D2" # Blue
-                else: txt_color = "#333"
+                if sec_profit > 0: cls="text-red"; sign="+"
+                elif sec_profit < 0: cls="text-blue"; sign=""
+                else: cls="text-gray"; sign=""
+                
+                # 금액이 크면 '만' 단위 절사
+                val_str = f"{sec_profit/10000:,.0f}만" if abs(sec_profit) >= 10000 else f"{sec_profit:,.0f}"
                 
                 st.markdown(f"""
-                <div style="background:{bg_color}; padding:10px; border-radius:8px; border:1px solid #eee; text-align:center;">
-                    <div style="font-size:0.9em; color:#666;">{info['emoji']} {info['name']}</div>
-                    <div style="font-size:1.1em; font-weight:bold; color:{txt_color};">{sec_profit:,.0f}원</div>
+                <div class="cube-card" style="padding:10px;">
+                    <div class="cube-title" style="font-size:0.8rem;">{info['emoji']} {info['name'].split(' ')[0]}</div>
+                    <div class="cube-value {cls}" style="font-size:1rem;">{sign}{val_str}</div>
+                    <div class="cube-sub {cls}">({sign}{sec_roi:.1f}%)</div>
                 </div>
                 """, unsafe_allow_html=True)
         
         st.markdown("---")
         
-        # 섹터별 개별 카드 (가로 배치)
+        # 개별 종목 카드
         for code, info in SECTORS.items():
             sec_df = df_combined[df_combined['Sector'] == code]
             if sec_df.empty: continue
             
-            st.markdown(f"#### {info['emoji']} {info['name']}")
+            st.markdown(f"**{info['emoji']} {info['name']}**")
             
-            # 카드를 그리드로 배치 (한 줄에 3~4개 정도 들어가게)
-            # 스트림릿 columns를 사용하여 배치
-            cols = st.columns(len(sec_df) if len(sec_df) < 4 else 4) 
-            
+            # 반응형 그리드 흉내 (st.columns 활용)
+            cols = st.columns(4) 
             for idx, row in enumerate(sec_df.itertuples()):
-                # 열 순환 (Wrap around)
                 with cols[idx % 4]:
-                    # [디자인 로직]
-                    # 1. 금액: 일반 텍스트 (검정)
-                    # 2. 손익: ▲/▼ + 금액 (색상)
-                    # 3. 수익률: ±% (색상, 괄호 없음)
-                    
                     roi_val = row.Total_Profit / row.Principal * 100 if row.Principal else 0
                     
-                    if row.Total_Profit > 0:
-                        cls = "red"; symbol = "▲"; sign = "+"
-                        color_code = "#D32F2F"
-                    elif row.Total_Profit < 0:
-                        cls = "blue"; symbol = "▼"; sign = "" # 음수는 숫자에 -가 포함됨
-                        color_code = "#1976D2"
-                    else:
-                        cls = "gray"; symbol = "-"; sign = ""
-                        color_code = "#666"
-
-                    # 안전마진 뱃지 색상 (양수=안전=초록)
-                    margin_color = "#2E7D32" if row.Safety_Margin > 0 else "#D32F2F"
-                    margin_txt = "∞" if row.Ticker == '💵 USD CASH' else f"{row.Safety_Margin:+.0f}"
-
-                    # 카드 HTML
-                    card_html = f"""
-                    <div style="background:white; padding:15px; border-radius:10px; border:1px solid #eee; box-shadow:0 1px 3px rgba(0,0,0,0.1); margin-bottom:10px;">
-                        <div style="font-weight:bold; font-size:1.05em; margin-bottom:8px;">
-                            {row.Ticker} <span style="font-size:0.8em; color:#888; font-weight:normal;">{row.Name}</span>
-                        </div>
-                        <div style="font-size:1.2em; font-weight:bold; color:#333; margin-bottom:2px;">
-                            {row.Eval:,.0f}원
-                        </div>
-                        <div style="font-size:1em; color:{color_code}; margin-bottom:8px;">
-                            {symbol} {abs(row.Total_Profit):,.0f} <span style="font-size:0.9em; margin-left:4px;">{sign}{roi_val:.2f}%</span>
-                        </div>
-                        <div style="font-size:0.8em; color:#555;">
-                            안전마진 <span style="background:{margin_color}15; color:{margin_color}; padding:2px 6px; border-radius:4px; font-weight:bold;">{margin_txt}</span>
-                        </div>
-                    </div>
-                    """
-                    st.markdown(card_html, unsafe_allow_html=True)
+                    if row.Total_Profit > 0: cls="text-red"; sym="▲"; s="+"
+                    elif row.Total_Profit < 0: cls="text-blue"; sym="▼"; s=""
+                    else: cls="text-gray"; sym="-"; s=""
                     
-                    # 팝업 버튼 (카드 바로 아래 배치)
-                    with st.popover("🔍 상세 보기", use_container_width=True):
-                        st.markdown(f"### {row.Ticker} 상세 분석")
+                    # 큐브 카드 HTML
+                    st.markdown(f"""
+                    <div class="cube-card">
+                        <div class="cube-title">{row.Ticker}</div>
+                        <div class="cube-value">{row.Eval/10000:,.0f}만</div>
+                        <div class="cube-sub {cls}">{sym} {abs(row.Total_Profit)/10000:,.0f}만 ({s}{roi_val:.1f}%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # 팝업 버튼 (아이콘만 표시)
+                    with st.popover("🔍", use_container_width=True):
+                        st.markdown(f"### {row.Ticker} 상세")
+                        st.divider()
+                        c1, c2 = st.columns(2)
+                        c1.metric("평가금액", f"{row.Eval:,.0f}원")
+                        c2.metric("투자원금", f"{row.Principal:,.0f}원")
                         
-                        st.markdown("##### 💰 자산 현황")
-                        col_a, col_b = st.columns(2)
-                        col_a.metric("투자원금", f"{row.Principal:,.0f}원")
-                        col_b.metric("평가금액", f"{row.Eval:,.0f}원", f"{row.Total_Profit:,.0f}원")
+                        st.write(f"**💰 손익분해**")
+                        st.write(f"- 주가: {row.Price_Profit:,.0f} ({row.Price_Profit/row.Principal*100:+.1f}%)")
+                        st.write(f"- 환율: {row.FX_Profit:,.0f} ({row.FX_Profit/row.Principal*100:+.1f}%)")
+                        st.write(f"- 배당: {row.Div_Profit:,.0f}")
                         
-                        st.markdown("##### 📊 수익 분해")
-                        # 0값은 '-' 처리
-                        def fmt(v): return f"{v:,.0f}원" if v!=0 else "-"
-                        st.write(f"- **주가 손익:** {fmt(row.Price_Profit)}")
-                        st.write(f"- **환율 손익:** {fmt(row.FX_Profit)}")
-                        st.write(f"- **배당 수익:** {fmt(row.Div_Profit)}")
-                        
-                        st.markdown("##### 🛡️ 리스크")
-                        st.write(f"- **매수 환율:** {row.Buy_Rate:,.1f}원")
+                        st.divider()
                         if row.Ticker != '💵 USD CASH':
-                            st.write(f"- **손익분기:** {row.BE_Rate:,.1f}원")
-                            margin_msg = "안전" if row.Safety_Margin > 0 else "주의"
-                            st.write(f"- **안전마진:** {row.Safety_Margin:+.1f}원 ({margin_msg})")
+                            margin_col = "green" if row.Safety_Margin > 0 else "red"
+                            st.write(f"**🛡️ 안전마진:** :{margin_col}[{row.Safety_Margin:+.1f}원]")
+                            st.caption(f"(손익분기 환율: {row.BE_Rate:,.1f}원)")
 
-    # -------------------------------------------------------------------
-    # [TAB 3] HTML 복행 테이블 (재도전)
-    # -------------------------------------------------------------------
+    # [TAB 3] HTML 통합 테이블
     with tab_html:
         def make_clean_html(df):
             rows = ""
             for _, row in df.iterrows():
-                # 색상/기호 로직 (카드와 동일)
-                if row['Total_Profit'] > 0: 
-                    t_cls = "red"; t_sym = "▲"
-                elif row['Total_Profit'] < 0: 
-                    t_cls = "blue"; t_sym = "▼"
-                else: 
-                    t_cls = "zero"; t_sym = "-"
+                if row['Total_Profit'] > 0: t_cls="red"; t_sym="▲"
+                elif row['Total_Profit'] < 0: t_cls="blue"; t_sym="▼"
+                else: t_cls="zero"; t_sym="-"
                 
-                # 값 포맷팅 helper
-                def val_fmt(v, is_pct=False):
-                    if v == 0: return '<span class="zero">-</span>'
-                    color = "red" if v > 0 else "blue"
-                    # 부호 제거하고 색상으로 표현 (요청사항 반영)
-                    # 하지만 테이블에서는 ±가 명확해야 하므로 유지하되 스타일 적용
-                    if is_pct: txt = f"{v:+.2f}%"
-                    else: txt = f"{v:,.0f}"
-                    return f'<span class="{color}">{txt}</span>'
+                def v_fmt(v, pct=False):
+                    if v==0: return '<span class="zero">-</span>'
+                    c = "red" if v>0 else "blue"
+                    t = f"{v:+.2f}%" if pct else f"{v:,.0f}"
+                    return f'<span class="{c}">{t}</span>'
 
                 p_roi = row['Price_Profit']/row['Principal']*100 if row['Principal'] else 0
                 f_roi = row['FX_Profit']/row['Principal']*100 if row['Principal'] else 0
@@ -337,20 +332,19 @@ try:
                 rows += f"""
                 <tr>
                     <td style="text-align:left"><b>{row['Ticker']}</b><br><span style="font-size:0.8em;color:gray">{row['Name']}</span></td>
-                    <td>{val_fmt(row['Price_Profit'])}<br><span style="font-size:0.85em">{val_fmt(p_roi, True)}</span></td>
-                    <td>{val_fmt(row['FX_Profit'])}<br><span style="font-size:0.85em">{val_fmt(f_roi, True)}</span></td>
-                    <td>{val_fmt(row['Total_Profit'])}<br><span style="font-size:0.85em">{val_fmt(t_roi, True)}</span></td>
+                    <td>{v_fmt(row['Price_Profit'])}<br><span style="font-size:0.85em">{v_fmt(p_roi, True)}</span></td>
+                    <td>{v_fmt(row['FX_Profit'])}<br><span style="font-size:0.85em">{v_fmt(f_roi, True)}</span></td>
+                    <td>{v_fmt(row['Total_Profit'])}<br><span style="font-size:0.85em">{v_fmt(t_roi, True)}</span></td>
                     <td><b>{margin_txt}</b></td>
                 </tr>"""
             
-            # dedent로 들여쓰기 제거 -> 코드 노출 방지
             return textwrap.dedent(f"""
             <style>
                 .red {{color: #D32F2F; font-weight: bold;}}
                 .blue {{color: #1976D2; font-weight: bold;}}
                 .zero {{color: #ccc;}}
                 table {{width: 100%; border-collapse: collapse; font-size: 0.9em;}}
-                th {{background: #f0f2f6; padding: 10px; text-align: right; color: #333; border-bottom: 2px solid #ccc;}}
+                th {{background: #f0f2f6; padding: 10px; text-align: right; color: #333; border-bottom: 2px solid #ccc; position: sticky; top: 0;}}
                 td {{padding: 10px; border-bottom: 1px solid #eee; text-align: right; vertical-align: middle;}}
             </style>
             <table>
@@ -366,53 +360,43 @@ try:
                 <tbody>{rows}</tbody>
             </table>
             """)
-
         st.markdown(make_clean_html(df_combined), unsafe_allow_html=True)
 
-    # -------------------------------------------------------------------
-    # [TAB 4] 세부 내역 (기존 Styler 유지)
-    # -------------------------------------------------------------------
+    # [TAB 4] 세부 내역
     with tab_detail:
-        st.caption("※ 해외자산의 상세 데이터와 국내 ETF/예금 현황입니다.")
-        sub_t1, sub_t2, sub_t3 = st.tabs(["🇺🇸 전체 리스트", "🇰🇷 국내 ETF", "🏦 예금/공제"])
-        
+        sub_t1, sub_t2, sub_t3 = st.tabs(["🇺🇸 미국주식", "🇰🇷 국내ETF", "🏦 예금/공제"])
         with sub_t1:
-            # 표시용 DF
-            df_view = df_combined.copy()
-            df_view['주가(%)'] = df_view.apply(lambda x: x['Price_Profit']/x['Principal'] if x['Principal'] else 0, axis=1)
-            df_view['환(%)'] = df_view.apply(lambda x: x['FX_Profit']/x['Principal'] if x['Principal'] else 0, axis=1)
-            df_view['총수익(%)'] = df_view.apply(lambda x: x['Total_Profit']/x['Principal'] if x['Principal'] else 0, axis=1)
+            # 현금 맨 뒤로 보내기
+            df_detail = df_combined.copy()
+            df_detail['SortKey'] = df_detail['Ticker'].apply(lambda x: 999 if 'CASH' in x else 0)
+            df_detail = df_detail.sort_values(['SortKey', 'Ticker']).drop(columns=['SortKey'])
             
-            cols = ['Ticker', 'Principal', 'Eval', 'Price_Profit', '주가(%)', 'FX_Profit', '환(%)', 'Total_Profit', '총수익(%)', 'Safety_Margin']
-            df_view = df_view[cols]
-            df_view.columns = ['종목', '투자원금', '평가금액', '주가손익', '주가(%)', '환손익', '환(%)', '합계손익', '총수익(%)', '안전마진']
+            # 표시용 포맷팅
+            df_view = df_detail[['Ticker', 'Principal', 'Eval', 'Price_Profit', 'FX_Profit', 'Total_Profit', 'Safety_Margin']].copy()
+            df_view['ROI'] = df_detail['Total_Profit'] / df_detail['Principal']
             
             # 합계행
             sum_row = df_view.sum(numeric_only=True)
-            sum_row['주가(%)'] = sum_row['주가손익'] / sum_row['투자원금']
-            sum_row['환(%)'] = sum_row['환손익'] / sum_row['투자원금']
-            sum_row['총수익(%)'] = sum_row['합계손익'] / sum_row['투자원금']
-            sum_row['종목'] = '🔴 TOTAL'
+            sum_row['ROI'] = sum_row['Total_Profit'] / sum_row['Principal']
+            sum_row['Ticker'] = '🔴 TOTAL'
             df_view = pd.concat([df_view, pd.DataFrame([sum_row])], ignore_index=True)
-
-            def fmt_money(v): return "-" if v==0 else f"{v:,.0f}"
-            def fmt_pct(v): return "-" if v==0 else f"{v:+.2%}"
-            def color_rb(v):
+            
+            def color_map(v):
                 if isinstance(v, (int, float)) and v!=0:
                     return 'color: #D32F2F; font-weight: bold;' if v>0 else 'color: #1976D2; font-weight: bold;'
                 return ''
-
+            
             st.dataframe(
-                df_view.style
-                .format({'투자원금':fmt_money, '평가금액':fmt_money, '주가손익':fmt_money, '환손익':fmt_money, '합계손익':fmt_money, '주가(%)':fmt_pct, '환(%)':fmt_pct, '총수익(%)':fmt_pct, '안전마진':"{:,.1f}"})
-                .applymap(color_rb, subset=['주가손익','환손익','합계손익','주가(%)','환(%)','총수익(%)','안전마진']),
+                df_view.style.format("{:,.0f}", subset=['Principal','Eval','Price_Profit','FX_Profit','Total_Profit'])
+                .format("{:+.2%}", subset=['ROI'])
+                .format("{:+.1f}", subset=['Safety_Margin'])
+                .applymap(color_map, subset=['Price_Profit','FX_Profit','Total_Profit','ROI','Safety_Margin']),
                 use_container_width=True
             )
-
         with sub_t2:
             if not etf_df.empty: st.dataframe(etf_df, use_container_width=True)
         with sub_t3:
             if not krw_assets_df.empty: st.dataframe(krw_assets_df, use_container_width=True)
 
 except Exception as e:
-    st.error(f"⚠️ 시스템 오류 발생: {e}")
+    st.error(f"시스템 오류: {e}")
