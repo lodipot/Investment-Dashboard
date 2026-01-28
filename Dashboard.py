@@ -8,31 +8,31 @@ import textwrap
 import re
 
 # -------------------------------------------------------------------
-# 1. 초기 설정 & 통합 스타일링
+# 1. 초기 설정 & 테마 대응 CSS
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Strategy Command", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
-# 세션 상태 초기화 (입력 로그용)
+# 세션 상태 초기화
 if 'input_log' not in st.session_state:
     st.session_state['input_log'] = []
 
 st.markdown("""
 <style>
-    /* [1] 사이드바 완전 숨김 (원페이지 앱 느낌) */
+    /* [1] 사이드바 숨김 */
     [data-testid="stSidebar"] { display: none; }
     
-    /* [2] 메인 탭바 상단 고정 (Sticky Main Tabs) */
+    /* [2] 탭바 상단 고정 (테마 색상 적용) */
     div[data-testid="stTabs"] > div:first-child {
         position: sticky;
         top: 0;
         z-index: 1000;
-        background-color: white;
+        background-color: var(--background-color); /* 테마 배경색 따름 */
         padding-top: 1rem;
         padding-bottom: 0.5rem;
-        border-bottom: 1px solid #f0f0f0;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.2);
     }
 
-    /* [3] KPI 컨테이너 (3열 고정 Grid) */
+    /* [3] KPI 컨테이너 */
     .kpi-container {
         display: grid;
         grid-template-columns: 1fr 1fr 1fr;
@@ -40,8 +40,8 @@ st.markdown("""
         margin-bottom: 20px;
     }
     .kpi-cube {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
+        background-color: var(--secondary-background-color); /* 테마 보조 배경색 */
+        border: 1px solid rgba(128, 128, 128, 0.2);
         border-radius: 12px;
         padding: 1vw;
         text-align: center;
@@ -51,14 +51,30 @@ st.markdown("""
         aspect-ratio: 1 / 0.8;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    .kpi-title { font-size: clamp(10px, 1.2vw, 16px); color: #6c757d; font-weight: 600; white-space: nowrap; }
-    .kpi-value { font-size: clamp(14px, 2.5vw, 32px); font-weight: 800; color: #212529; margin: 4px 0; }
-    .kpi-sub { font-size: clamp(9px, 1vw, 14px); font-weight: 500; }
+    .kpi-title { 
+        font-size: clamp(10px, 1.2vw, 16px); 
+        color: var(--text-color); /* 테마 글자색 */
+        opacity: 0.7; 
+        font-weight: 600; 
+        white-space: nowrap; 
+    }
+    .kpi-value { 
+        font-size: clamp(14px, 2.5vw, 32px); 
+        font-weight: 800; 
+        color: var(--text-color); 
+        margin: 4px 0; 
+    }
+    .kpi-sub { 
+        font-size: clamp(9px, 1vw, 14px); 
+        font-weight: 500; 
+        color: var(--text-color);
+        opacity: 0.8;
+    }
 
-    /* [4] 주식 카드 (Rich Info Style) */
+    /* [4] 주식 카드 (Rich Info Style - 테마 대응) */
     .stock-card {
-        background-color: white;
-        border: 1px solid #e9ecef;
+        background-color: var(--secondary-background-color); /* 카드 배경 */
+        border: 1px solid rgba(128, 128, 128, 0.2);
         border-radius: 12px;
         padding: 16px;
         margin-bottom: 10px;
@@ -66,27 +82,43 @@ st.markdown("""
         transition: transform 0.2s;
     }
     .card-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-    .ticker-name { font-size: 1.1rem; font-weight: 700; color: #333; }
-    .full-name { font-size: 0.8rem; color: #888; margin-left: 6px; }
-    .main-val { font-size: 1.4rem; font-weight: 800; color: #212529; margin-bottom: 4px; }
+    .ticker-name { font-size: 1.1rem; font-weight: 700; color: var(--text-color); }
+    .full-name { font-size: 0.8rem; color: var(--text-color); opacity: 0.6; margin-left: 6px; }
+    .main-val { font-size: 1.4rem; font-weight: 800; color: var(--text-color); margin-bottom: 4px; }
     .profit-row { font-size: 0.95rem; font-weight: 600; margin-bottom: 12px; }
-    .badge-margin { display: inline-block; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; font-weight: 700; }
+    
+    .badge-margin { display: inline-block; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; font-weight: 700; color: #333; } /* 뱃지 글씨는 잘 보이게 검정 고정 */
 
     /* [5] 모바일 버튼 텍스트 깨짐 방지 */
     div[data-testid="stPopover"] > button {
         width: 100%;
+        background-color: var(--secondary-background-color);
+        border: 1px solid rgba(128, 128, 128, 0.2);
         color: transparent !important;
-        text-shadow: 0 0 0 #495057;
+        text-shadow: 0 0 0 var(--text-color); /* 이모지 색상을 테마 글자색으로 */
         height: 38px;
     }
 
-    /* 유틸리티 색상 */
-    .c-red { color: #D32F2F !important; }
-    .c-blue { color: #1976D2 !important; }
-    .c-gray { color: #adb5bd !important; }
-    .bg-red-light { background-color: #ffebee !important; color: #c62828 !important; }
-    .bg-green-light { background-color: #e8f5e9 !important; color: #2e7d32 !important; }
-    .bg-gray-light { background-color: #f8f9fa !important; color: #495057 !important; }
+    /* 유틸리티 색상 (다크모드에서도 잘 보이는 컬러로 조정) */
+    .c-red { color: #FF5252 !important; } /* 다크모드 가독성 위해 약간 밝게 */
+    .c-blue { color: #448AFF !important; }
+    .c-gray { color: #9E9E9E !important; }
+    
+    /* 뱃지 배경색 */
+    .bg-red-light { background-color: rgba(255, 82, 82, 0.2) !important; color: #FF5252 !important; }
+    .bg-green-light { background-color: rgba(105, 240, 174, 0.2) !important; color: #69F0AE !important; }
+    .bg-gray-light { background-color: rgba(158, 158, 158, 0.2) !important; color: #9E9E9E !important; }
+    
+    /* 통합 테이블 테마 대응 */
+    .table-header { 
+        background-color: var(--secondary-background-color); 
+        color: var(--text-color); 
+        border-bottom: 2px solid rgba(128, 128, 128, 0.2);
+    }
+    .table-row {
+        border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+        color: var(--text-color);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -102,7 +134,7 @@ SECTORS = {
 SORT_ORDER = ['O', 'PLD', 'JEPI', 'JEPQ', 'KO', 'SCHD', 'GOOGL', 'MSFT', 'AMD', 'NVDA', 'TSLA', '💵 USD CASH']
 
 # -------------------------------------------------------------------
-# 2. 공통 함수 (데이터 로드 & 계산)
+# 2. 공통 함수
 # -------------------------------------------------------------------
 def get_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -147,7 +179,7 @@ def get_market_data(tickers):
             except: pass
     return fx, fx_status, data_map
 
-# 평단 자동 계산 (8자리) - Input Manager용
+# 평단 자동 계산 (8자리)
 def calculate_metrics_live(sh):
     try:
         ex_df = pd.DataFrame(sh.worksheet("Exchange_Log").get_all_records())
@@ -187,17 +219,12 @@ def calculate_metrics_live(sh):
 # -------------------------------------------------------------------
 # 3. 메인 앱 로직
 # -------------------------------------------------------------------
-
-# 최상단 메인 탭 (네비게이션 대체)
 main_tab1, main_tab2 = st.tabs(["📊 대시보드", "📝 입력 매니저"])
 
-# ===================================================================
 # [PAGE 1] 대시보드
-# ===================================================================
 with main_tab1:
     trade_df, exchange_df, krw_assets_df, etf_df, div_df = load_data()
     
-    # 데이터 가공 및 계산 로직 (기존 Dashboard.py 로직과 동일)
     if not exchange_df.empty:
         exchange_df['USD_Amount'] = clean_currency(exchange_df['USD_Amount'])
         exchange_df['KRW_Amount'] = clean_currency(exchange_df['KRW_Amount'])
@@ -210,7 +237,6 @@ with main_tab1:
     unique_tickers = trade_df['Ticker'].unique().tolist()
     current_rate, fx_status, price_map = get_market_data(unique_tickers)
 
-    # 현금 & 주식 계산 (로직 생략 없이 그대로 적용)
     total_usd_exchanged = exchange_df['USD_Amount'].sum() if not exchange_df.empty else 0
     total_krw_exchanged = exchange_df['KRW_Amount'].sum() if not exchange_df.empty else 0
     avg_cash_rate = total_krw_exchanged / total_usd_exchanged if total_usd_exchanged > 0 else 0
@@ -234,7 +260,7 @@ with main_tab1:
             
             p_usd = (group['Qty'] * group['Price_USD']).sum()
             p_krw = (group['Qty'] * group['Price_USD'] * group['Exchange_Rate']).sum()
-            if p_krw == 0 and p_usd > 0: p_krw = p_usd * 1450 # Fallback
+            if p_krw == 0 and p_usd > 0: p_krw = p_usd * 1450
             
             cur_p = price_map.get(ticker, 0)
             if cur_p == 0: cur_p = p_usd / qty
@@ -242,14 +268,14 @@ with main_tab1:
             eval_krw = qty * cur_p * current_rate
             div_krw = div_df[div_df['Ticker'] == ticker]['Amount_USD'].sum() * current_rate if not div_df.empty else 0
             
-            fx_p = p_usd * (current_rate - (p_krw/p_usd if p_usd else 0))
+            avg_buy_rate = p_krw / p_usd if p_usd else 0
+            fx_p = p_usd * (current_rate - avg_buy_rate)
             tot_p = (eval_krw - p_krw) + div_krw
             pri_p = tot_p - fx_p - div_krw
             
-            be = (p_krw - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0 # BEP 환율 역산
-            if be == 0: be_rate = 0 
-            else: be_rate = (p_krw - div_krw) / (qty * cur_p) # Logic check: BEP rate = (Principal_KRW - Div_KRW) / Eval_USD
-
+            be = (p_krw - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
+            be_rate = 0 if be == 0 else be
+            
             stock_rows.append({
                 'Ticker': ticker, 'Name': group['Name'].iloc[0], 'Principal': p_krw, 'Eval': eval_krw,
                 'Price_Profit': pri_p, 'FX_Profit': fx_p, 'Div_Profit': div_krw, 'Total_Profit': tot_p,
@@ -266,7 +292,6 @@ with main_tab1:
     df_combined['SortKey'] = df_combined['Ticker'].apply(lambda x: SORT_ORDER.index(x) if x in SORT_ORDER else 999)
     df_combined = df_combined.sort_values(['SortKey', 'Ticker']).drop(columns=['SortKey'])
 
-    # 대시보드 내부 서브 탭
     sub_kpi, sub_card, sub_html, sub_detail = st.tabs(["📊 KPI", "🗂️ 카드", "📑 통합", "📋 세부"])
 
     with sub_kpi:
@@ -304,8 +329,8 @@ with main_tab1:
             cls = "c-red" if s_prof > 0 else "c-blue" if s_prof < 0 else "c-gray"
             with sec_cols[i]:
                 st.markdown(f"""
-                <div style="text-align:center; padding:5px; background:#f8f9fa; border-radius:8px;">
-                    <div style="font-size:0.8rem; color:#666;">{info['emoji']} {info['name'].split(' ')[0]}</div>
+                <div style="text-align:center; padding:5px; background:var(--secondary-background-color); border-radius:8px; border:1px solid rgba(128,128,128,0.2);">
+                    <div style="font-size:0.8rem; opacity:0.8;">{info['emoji']} {info['name'].split(' ')[0]}</div>
                     <div class="{cls}" style="font-size:0.9rem; font-weight:bold;">{s_prof:+,.0f}</div>
                     <div class="{cls}" style="font-size:0.75rem;">({s_roi:+.1f}%)</div>
                 </div>""", unsafe_allow_html=True)
@@ -322,9 +347,9 @@ with main_tab1:
                     cls = "c-red" if row.Total_Profit > 0 else "c-blue" if row.Total_Profit < 0 else "c-gray"
                     sym = "▲" if row.Total_Profit > 0 else "▼" if row.Total_Profit < 0 else "-"
                     
-                    margin_html = f'<span class="badge-margin bg-gray-light">∞</span>' if row.Ticker=='💵 USD CASH' else \
-                                  f'<span class="badge-margin bg-green-light">안전 +{row.Safety_Margin:,.0f}</span>' if row.Safety_Margin > 0 else \
-                                  f'<span class="badge-margin bg-red-light">위험 {row.Safety_Margin:,.0f}</span>'
+                    if row.Ticker=='💵 USD CASH': margin_html = f'<span class="badge-margin bg-gray-light">∞</span>'
+                    elif row.Safety_Margin > 0: margin_html = f'<span class="badge-margin bg-green-light">안전 +{row.Safety_Margin:,.0f}</span>'
+                    else: margin_html = f'<span class="badge-margin bg-red-light">위험 {row.Safety_Margin:,.0f}</span>'
                     
                     st.markdown(f"""
                     <div class="stock-card">
@@ -345,34 +370,28 @@ with main_tab1:
         def make_html(df):
             rows = ""
             for _, row in df.iterrows():
-                c = "red" if row['Total_Profit'] > 0 else "blue" if row['Total_Profit'] < 0 else "zero"
+                c = "c-red" if row['Total_Profit'] > 0 else "c-blue" if row['Total_Profit'] < 0 else "c-gray"
                 def vf(v): return f'<span class="{c}">{v:,.0f}</span>'
-                rows += f"<tr><td style='text-align:left'><b>{row['Ticker']}</b><br><span style='font-size:0.8em;color:gray'>{row['Name']}</span></td>"
+                rows += f"<tr class='table-row'><td style='text-align:left'><b>{row['Ticker']}</b><br><span style='font-size:0.8em;opacity:0.6'>{row['Name']}</span></td>"
                 rows += f"<td>{vf(row['Price_Profit'])}</td><td>{vf(row['FX_Profit'])}</td><td>{vf(row['Total_Profit'])}</td>"
                 rows += f"<td><b>{row['Safety_Margin']:+.1f}</b></td></tr>"
             
-            # 합계
             s_p = df['Price_Profit'].sum(); s_f = df['FX_Profit'].sum(); s_t = df['Total_Profit'].sum()
-            def sf(v): return f'<span class="{"red" if v>0 else "blue"}"><b>{v:,.0f}</b></span>'
-            rows += f"<tr style='background:#fafafa; border-top:2px solid #aaa;'><td style='text-align:left'>🔴 <b>TOTAL</b></td><td>{sf(s_p)}</td><td>{sf(s_f)}</td><td>{sf(s_t)}</td><td>-</td></tr>"
+            def sf(v): return f'<span class="{"c-red" if v>0 else "c-blue"}"><b>{v:,.0f}</b></span>'
+            rows += f"<tr style='background:rgba(128,128,128,0.1); border-top:2px solid rgba(128,128,128,0.3);'><td style='text-align:left'>🔴 <b>TOTAL</b></td><td>{sf(s_p)}</td><td>{sf(s_f)}</td><td>{sf(s_t)}</td><td>-</td></tr>"
             
-            return f"""<style>.red{{color:#D32F2F;font-weight:bold}}.blue{{color:#1976D2;font-weight:bold}}.zero{{color:#ccc}}table{{width:100%;border-collapse:collapse;font-size:0.9em}}th{{background:#f0f2f6;padding:10px;text-align:right;border-bottom:2px solid #ccc}}td{{padding:10px;border-bottom:1px solid #eee;text-align:right}}</style><table><thead><tr><th style='text-align:left'>종목</th><th>주가손익</th><th>환손익</th><th>합계손익</th><th>안전마진</th></tr></thead><tbody>{rows}</tbody></table>"""
+            return f"""<style>.c-red{{color:#FF5252;font-weight:bold}}.c-blue{{color:#448AFF;font-weight:bold}}.c-gray{{color:#9E9E9E}}table{{width:100%;border-collapse:collapse;font-size:0.9em;color:var(--text-color)}}th{{background:var(--secondary-background-color);padding:10px;text-align:right;border-bottom:2px solid rgba(128,128,128,0.3);position:sticky;top:0}}td{{padding:10px;border-bottom:1px solid rgba(128,128,128,0.1);text-align:right}}</style><table><thead><tr><th style='text-align:left'>종목</th><th>주가손익</th><th>환손익</th><th>합계손익</th><th>안전마진</th></tr></thead><tbody>{rows}</tbody></table>"""
         st.markdown(make_html(df_combined), unsafe_allow_html=True)
 
     with sub_detail:
         st.dataframe(df_combined[['Ticker','Principal','Eval','Price_Profit','FX_Profit','Total_Profit','Safety_Margin']], use_container_width=True)
 
-# ===================================================================
 # [PAGE 2] 입력 매니저
-# ===================================================================
 with main_tab2:
     st.subheader("데이터 입력")
-    
-    # 세션 로그 표시 (롤백 대체 기능)
     if st.session_state['input_log']:
-        st.info("📋 **이번 접속 세션 입력 내역 (성공)**")
-        for log in st.session_state['input_log']:
-            st.caption(f"✅ {log}")
+        st.info("📋 **이번 세션 입력 내역**")
+        for log in st.session_state['input_log']: st.caption(f"✅ {log}")
         st.divider()
 
     col_date, col_text = st.columns([1, 2])
@@ -383,7 +402,7 @@ with main_tab2:
         if is_dividend:
             try: today_rate = yf.Ticker("USDKRW=X").history(period="1d")['Close'].iloc[-1]
             except: today_rate = 1450.0
-            manual_rate = st.number_input("배당 적용 환율", value=float(round(today_rate, 2)), step=0.1, format="%.2f")
+            manual_rate = st.number_input("배당 환율", value=float(round(today_rate, 2)), step=0.1, format="%.2f")
     
     with col_text:
         raw_text = st.text_area("카톡/텍스트 붙여넣기", height=150)
@@ -394,42 +413,32 @@ with main_tab2:
                 sh = get_client()
                 curr_avg_rate = calculate_metrics_live(sh)
                 ts = datetime.now().strftime('%Y%m%d%H%M%S')
-                
                 log_msg = ""
                 
                 if "배당" in raw_text or is_dividend:
-                    # 배당 처리
                     tk = re.search(r'([A-Z]+)/', raw_text); amt = re.search(r'USD ([\d,.]+)', raw_text)
                     t_val = tk.group(1) if tk else "UNKNOWN"; a_val = float(amt.group(1).replace(',','')) if amt else 0
                     if a_val > 0:
                         sh.worksheet("Dividend_Log").append_row([str(input_date), ts, t_val, a_val, manual_rate, "카톡파싱"])
-                        log_msg = f"배당: {t_val} ${a_val} (@{manual_rate}원)"
-                
+                        log_msg = f"배당: {t_val} ${a_val}"
                 elif "외화매수환전" in raw_text:
-                    # 환전 처리
                     krw = re.search(r'￦([\d,]+)', raw_text); usd = re.search(r'USD ([\d,.]+)', raw_text)
                     if krw and usd:
                         k_val = int(krw.group(1).replace(',','')); u_val = float(usd.group(1).replace(',',''))
                         rate = k_val / u_val
                         sh.worksheet("Exchange_Log").append_row([str(input_date), ts, "KRW_to_USD", k_val, u_val, rate, "", "", "카톡파싱"])
-                        log_msg = f"환전: ${u_val} (환율 {rate:.1f}원)"
-
+                        log_msg = f"환전: ${u_val}"
                 elif "체결안내" in raw_text:
-                    # 매수 처리
                     tk = re.search(r'\*종목명:([A-Z]+)/', raw_text); qt = re.search(r'\*체결수량:([\d]+)', raw_text); pr = re.search(r'\*체결단가:USD ([\d.]+)', raw_text)
                     if tk:
                         t_val = tk.group(1); q_val = int(qt.group(1)); p_val = float(pr.group(1))
                         sh.worksheet("Trade_Log").append_row([str(input_date), ts, t_val, t_val, "Buy", q_val, p_val, curr_avg_rate, "카톡파싱"])
-                        log_msg = f"매수: {t_val} {q_val}주 (${p_val}) - 평단 {curr_avg_rate:.1f}원 적용"
+                        log_msg = f"매수: {t_val} {q_val}주"
 
                 if log_msg:
                     st.session_state['input_log'].append(log_msg)
                     st.success(f"저장 완료! ({log_msg})")
                     st.balloons()
-                    # 데이터 갱신을 위해 캐시 클리어
                     st.cache_data.clear()
-                else:
-                    st.error("형식을 인식할 수 없습니다.")
-                    
-            except Exception as e:
-                st.error(f"오류: {e}")
+                else: st.error("형식 인식 실패")
+            except Exception as e: st.error(f"오류: {e}")
