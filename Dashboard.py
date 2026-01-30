@@ -6,30 +6,27 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import textwrap
 import re
-import KIS_API_Manager as kis  # 방금 만든 파일 불러오기
+
+# [NEW] KIS API 매니저 불러오기
+import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# 1. 초기 설정 & 스타일 (Samsung Browser & Dark Mode Fix)
+# 1. 초기 설정 & 스타일
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Strategy Command", layout="wide", page_icon="📈", initial_sidebar_state="collapsed")
 
-# 세션 초기화
 if 'input_log' not in st.session_state: st.session_state['input_log'] = []
 
 st.markdown("""
 <style>
-    /* [1] 사이드바 숨김 & 탭바 고정 */
     [data-testid="stSidebar"] { display: none; }
     div[data-testid="stTabs"] > div:first-child {
         position: sticky; top: 0; z-index: 1000;
         background-color: var(--background-color);
         padding-top: 1rem; border-bottom: 1px solid rgba(128,128,128,0.2);
     }
-
-    /* [2] KPI 컨테이너 (4열 Grid - 누적수익 추가) */
     .kpi-container {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr); /* 4등분 */
+        display: grid; grid-template-columns: repeat(4, 1fr);
         gap: 8px; margin-bottom: 20px;
     }
     .kpi-cube {
@@ -42,8 +39,7 @@ st.markdown("""
     .kpi-title { font-size: 0.8rem; opacity: 0.7; font-weight: 600; white-space: nowrap; }
     .kpi-value { font-size: clamp(12px, 2vw, 24px); font-weight: 800; margin: 4px 0; }
     .kpi-sub { font-size: 0.7rem; opacity: 0.8; }
-
-    /* [3] 주식 카드 (Rich Info - No Parenthesis Style) */
+    
     .stock-card {
         background-color: var(--secondary-background-color);
         border: 1px solid rgba(128,128,128,0.2);
@@ -54,40 +50,33 @@ st.markdown("""
     .ticker-name { font-size: 1.1rem; font-weight: 700; color: var(--text-color); }
     .full-name { font-size: 0.8rem; opacity: 0.6; margin-left: 6px; }
     .main-val { font-size: 1.4rem; font-weight: 800; margin-bottom: 6px; }
-    
-    /* [수정] 괄호 없는 손익 표시 스타일 */
     .profit-line { display: flex; align-items: baseline; gap: 8px; font-weight: 700; }
     .profit-amt { font-size: 1.0rem; }
     .profit-rate { font-size: 0.9rem; opacity: 0.9; }
     
     .badge-margin { display: inline-block; padding: 3px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; color: #333; margin-top: 8px; }
-
-    /* [4] 모바일 버튼 텍스트 깨짐 방지 (Samsung Internet Fix) */
+    
     div[data-testid="stPopover"] > button {
         width: 100%;
         background-color: var(--secondary-background-color);
         border: 1px solid rgba(128,128,128,0.2);
         color: transparent !important;
-        -webkit-text-fill-color: transparent !important; /* 삼성 브라우저 강제 투명화 */
+        -webkit-text-fill-color: transparent !important;
         text-shadow: 0 0 0 var(--text-color);
         height: 38px; overflow: hidden;
     }
     div[data-testid="stPopover"] > button p { font-family: sans-serif !important; }
 
-    /* 유틸리티 색상 */
     .c-red { color: #FF5252 !important; }
     .c-blue { color: #448AFF !important; }
     .c-gray { color: #9E9E9E !important; }
     .bg-red-light { background-color: rgba(255, 82, 82, 0.2) !important; color: #FF5252 !important; }
     .bg-green-light { background-color: rgba(105, 240, 174, 0.2) !important; color: #69F0AE !important; }
     .bg-gray-light { background-color: rgba(158, 158, 158, 0.2) !important; color: #9E9E9E !important; }
-    
-    /* 테이블 스타일 */
     .table-row { border-bottom: 1px solid rgba(128,128,128,0.1); }
 </style>
 """, unsafe_allow_html=True)
 
-# 상수
 BENCHMARK_RATE = 0.035
 SECTORS = {
     'REITS': {'emoji': '🏢', 'name': '리츠', 'tickers': ['O', 'PLD']},
@@ -141,11 +130,7 @@ def get_market_data(tickers):
             except: pass
     return fx, fx_status, data_map
 
-# -------------------------------------------------------------------
-# 3. 핵심 로직: 포트폴리오 상태 계산 (매수/매도/배당 반영)
-# -------------------------------------------------------------------
 def calculate_portfolio_state(trade_df, exchange_df, div_df):
-    # 1. 데이터 정제
     if not exchange_df.empty:
         exchange_df['USD_Amount'] = clean_currency(exchange_df['USD_Amount'])
         exchange_df['KRW_Amount'] = clean_currency(exchange_df['KRW_Amount'])
@@ -156,71 +141,53 @@ def calculate_portfolio_state(trade_df, exchange_df, div_df):
         div_df['Amount_USD'] = clean_currency(div_df['Amount_USD'])
         div_df['Ex_Rate'] = clean_currency(div_df['Ex_Rate'])
 
-    # 2. 타임라인 생성
     timeline = []
     for _, r in exchange_df.iterrows():
         timeline.append({'date': r['Date'], 'type': 'exchange', 'usd': r['USD_Amount'], 'krw': r['KRW_Amount'], 'obj': r})
     for _, r in div_df.iterrows():
-        # 배당은 해당 시점 환율로 KRW 가치 산정하여 현금풀에 기여
         timeline.append({'date': r['Date'], 'type': 'dividend', 'usd': r['Amount_USD'], 'krw': r['Amount_USD'] * r['Ex_Rate'], 'obj': r})
     for _, r in trade_df.iterrows():
-        # Type: Buy / Sell
         timeline.append({'date': r['Date'], 'type': 'trade', 'action': r['Type'], 'ticker': r['Ticker'], 
                          'qty': r['Qty'], 'price': r['Price_USD'], 'name': r.get('Name', r['Ticker'])})
     
-    # 시간순 정렬 (배당 > 환전 > 거래 순)
     prio = {'dividend':1, 'exchange':2, 'trade':3}
     timeline.sort(key=lambda x: (x['date'], prio.get(x['type'], 9)))
 
-    # 3. 상태 변수
     cash_usd = 0.0
-    cash_krw_basis = 0.0  # 현금의 원화 평단 계산용
-    
-    portfolio = {} # Ticker -> {qty, total_cost_usd, total_cost_krw, realized_pl_usd}
-    total_realized_pl_usd = 0.0 # 매도 실현 손익 누적 (USD)
-    total_dividend_usd = 0.0    # 배당 누적 (USD)
+    cash_krw_basis = 0.0
+    portfolio = {}
+    total_realized_pl_usd = 0.0
+    total_dividend_usd = 0.0
 
     for item in timeline:
         if item['type'] == 'exchange':
             cash_usd += item['usd']
             cash_krw_basis += item['krw']
-            
         elif item['type'] == 'dividend':
             cash_usd += item['usd']
-            cash_krw_basis += item['krw'] # 배당금도 현금 평단에 기여 (희석)
+            cash_krw_basis += item['krw']
             total_dividend_usd += item['usd']
-            
         elif item['type'] == 'trade':
             ticker = item['ticker']
             qty = item['qty']
             price = item['price']
             action = item.get('action', 'Buy')
             
-            # 포트폴리오 초기화
             if ticker not in portfolio:
                 portfolio[ticker] = {'qty': 0, 'total_cost_usd': 0.0, 'total_cost_krw': 0.0, 'realized_pl_usd': 0.0, 'name': item['name']}
             
-            # 현재 현금 평단가
             curr_cash_rate = (cash_krw_basis / cash_usd) if cash_usd > 0 else 1450.0
 
             if action == 'Buy':
                 cost_usd = qty * price
                 cost_krw = cost_usd * curr_cash_rate
-                
-                # 현금 차감
                 cash_usd -= cost_usd
                 cash_krw_basis -= cost_krw
-                
-                # 주식 잔고 증가
                 portfolio[ticker]['qty'] += qty
                 portfolio[ticker]['total_cost_usd'] += cost_usd
                 portfolio[ticker]['total_cost_krw'] += cost_krw
-                
             elif action == 'Sell':
-                # 매도 대금 (USD)
                 revenue_usd = qty * price
-                
-                # 매도된 주식의 평단(Cost Basis) 제거
                 curr_qty = portfolio[ticker]['qty']
                 if curr_qty > 0:
                     avg_cost_usd = portfolio[ticker]['total_cost_usd'] / curr_qty
@@ -230,49 +197,33 @@ def calculate_portfolio_state(trade_df, exchange_df, div_df):
                 
                 removed_cost_usd = qty * avg_cost_usd
                 removed_cost_krw = qty * avg_cost_krw
-                
-                # 실현 손익 (USD 기준) -> "주머니에 챙긴 돈"
-                # (판 돈 - 산 돈)
                 deal_pl_usd = revenue_usd - removed_cost_usd
                 
-                # 포트폴리오 갱신
                 portfolio[ticker]['qty'] -= qty
                 portfolio[ticker]['total_cost_usd'] -= removed_cost_usd
                 portfolio[ticker]['total_cost_krw'] -= removed_cost_krw
                 portfolio[ticker]['realized_pl_usd'] += deal_pl_usd
-                
                 total_realized_pl_usd += deal_pl_usd
                 
-                # 현금 풀 갱신 (사용자 로직: 매도 원금의 원화 가치는 그대로 현금 풀로 복귀)
-                # 이익분(deal_pl_usd)은 0의 KRW Cost로 들어오므로 평단을 낮춤 (이익 실현 효과)
                 cash_usd += revenue_usd
                 cash_krw_basis += removed_cost_krw 
 
-    # 최종 현금 평단
     cash_avg_rate = (cash_krw_basis / cash_usd) if cash_usd > 0 else 1450.0
-    
     return cash_usd, cash_avg_rate, portfolio, total_realized_pl_usd, total_dividend_usd
 
 # -------------------------------------------------------------------
-# 4. 메인 앱 실행
+# 3. 메인 앱 실행
 # -------------------------------------------------------------------
 main_tab1, main_tab2 = st.tabs(["📊 대시보드", "📝 입력 매니저"])
 
 # [PAGE 1] 대시보드
 with main_tab1:
     trade_df, exchange_df, krw_assets_df, etf_df, div_df = load_data()
-    
-    # 포트폴리오 계산 엔진 가동
     cash_usd, cash_rate, pf_data, total_realized_usd, total_div_usd = calculate_portfolio_state(trade_df, exchange_df, div_df)
-    
-    # 시장가 가져오기
     tickers = list(pf_data.keys())
     current_rate, fx_status, price_map = get_market_data(tickers)
     
-    # 표시용 데이터프레임 생성
     rows = []
-    
-    # 1. 현금 행
     cash_principal_krw = cash_usd * cash_rate
     cash_eval_krw = cash_usd * current_rate
     cash_fx_profit = cash_usd * (current_rate - cash_rate)
@@ -282,35 +233,26 @@ with main_tab1:
         'Principal': cash_principal_krw, 'Eval': cash_eval_krw,
         'Price_Profit': 0, 'FX_Profit': cash_fx_profit,
         'Div_Profit': 0, 'Realized_Profit': 0,
-        'Total_Profit': cash_fx_profit, # 현금은 환차익이 곧 총수익
+        'Total_Profit': cash_fx_profit,
         'Safety_Margin': 9999
     })
     
-    # 2. 주식 행
     for t, data in pf_data.items():
         qty = data['qty']
-        # 잔고가 없어도 실현손익이 있으면 리스트에는 포함 (단, 카드 뷰에서는 필터링 가능)
         if qty == 0 and data['realized_pl_usd'] == 0: continue
         
         cur_p = price_map.get(t, 0)
-        # 현재가 없으면 평단으로 대체 (잔고 0이면 0)
         if cur_p == 0 and qty > 0: cur_p = data['total_cost_usd'] / qty
         
         principal_krw = data['total_cost_krw']
         eval_usd = qty * cur_p
         eval_krw = eval_usd * current_rate
         
-        # 배당금 (종목별 누적)
         d_usd = div_df[div_df['Ticker'] == t]['Amount_USD'].sum() if not div_df.empty else 0
-        d_krw = d_usd * current_rate # 현재 가치로 환산
-        
-        # 실현 손익 (KRW 환산: 현재 환율 기준 가치)
+        d_krw = d_usd * current_rate
         realized_krw = data['realized_pl_usd'] * current_rate
-        
-        # 평가 손익 (미실현)
         unrealized_total = eval_krw - principal_krw
         
-        # 주가/환율 손익 분해 (보유분에 한함)
         if qty > 0:
             avg_buy_rate = principal_krw / (data['total_cost_usd']) if data['total_cost_usd'] else 0
             fx_profit = data['total_cost_usd'] * (current_rate - avg_buy_rate)
@@ -319,7 +261,6 @@ with main_tab1:
         else:
             fx_profit = 0; price_profit = 0; be_rate = 0
             
-        # 총 누적 손익 = 평가손익 + 실현손익 + 배당
         grand_total = unrealized_total + realized_krw + d_krw
         
         rows.append({
@@ -327,39 +268,25 @@ with main_tab1:
             'Principal': principal_krw, 'Eval': eval_krw,
             'Price_Profit': price_profit, 'FX_Profit': fx_profit,
             'Div_Profit': d_krw, 'Realized_Profit': realized_krw,
-            'Total_Profit': grand_total, # 표기상 Total은 누적 총합
-            'Unrealized_Total': unrealized_total, # 카드 표기용 (평가손익)
+            'Total_Profit': grand_total,
+            'Unrealized_Total': unrealized_total,
             'Safety_Margin': current_rate - be_rate if qty > 0 else 0,
             'Qty': qty
         })
         
     df_combined = pd.DataFrame(rows)
-    
-    # 정렬
     df_combined['SortKey'] = df_combined['Ticker'].apply(lambda x: SORT_ORDER.index(x) if x in SORT_ORDER else 999)
     df_combined = df_combined.sort_values(['SortKey', 'Ticker']).drop(columns=['SortKey'])
     
-    # ---------------- UI ----------------
     sub_kpi, sub_card, sub_html, sub_detail = st.tabs(["📊 KPI", "🗂️ 카드", "📑 통합", "📋 세부"])
     
     with sub_kpi:
-        # KPI 계산
-        # 총 투입 원금 = 현재 보유 원금 + (실현손익 제외? 아니면 포함? 수익률 계산시 분모는?)
-        # 단순화: 현재 잔고 기준 ROI + 누적 실현 수익 별도 표기
         curr_principal = df_combined['Principal'].sum()
         curr_eval = df_combined['Eval'].sum()
-        
-        # 누적 실현 수익 (매도차익 + 배당) - 현재 환율 가치
         acc_realized_usd = total_realized_usd + total_div_usd
         acc_realized_krw = acc_realized_usd * current_rate
-        
-        # 총 평가 수익 (미실현)
         curr_unrealized = curr_eval - curr_principal
-        
-        # 전체 ROI (평가 + 실현) / (현재원금 - 실현분? 복잡함. 단순 ROI: 평가/원금)
         roi = (curr_unrealized / curr_principal * 100) if curr_principal else 0
-        
-        # 순수 환차익
         fx_sum = df_combined['FX_Profit'].sum()
         fx_roi = (fx_sum / curr_principal * 100) if curr_principal else 0
         
@@ -389,7 +316,6 @@ with main_tab1:
         
     with sub_card:
         st.caption("📌 보유 종목 현황")
-        # 섹터별 요약 (보유중인 것만)
         active_df = df_combined[df_combined['Qty'] > 0] if 'Qty' in df_combined.columns else df_combined
         
         sec_cols = st.columns(len(SECTORS))
@@ -415,15 +341,11 @@ with main_tab1:
                 </div>""", unsafe_allow_html=True)
         
         st.markdown("---")
-        
-        # 개별 카드 (보유중인 것만)
         cols = st.columns(4)
         for idx, row in enumerate(active_df.itertuples()):
             with cols[idx % 4]:
-                # 카드 표시: 평가 손익 기준 (Unrealized)
                 profit = row.Unrealized_Total
                 roi_val = profit / row.Principal * 100 if row.Principal else 0
-                
                 c = "c-red" if profit > 0 else "c-blue" if profit < 0 else "c-gray"
                 sym = "▲" if profit > 0 else "▼" if profit < 0 else "-"
                 
@@ -431,7 +353,6 @@ with main_tab1:
                 elif row.Safety_Margin > 0: margin_html = f'<span class="badge-margin bg-green-light">안전 +{row.Safety_Margin:,.0f}</span>'
                 else: margin_html = f'<span class="badge-margin bg-red-light">위험 {row.Safety_Margin:,.0f}</span>'
                 
-                # [수정] 괄호 없는 디자인 반영
                 st.markdown(f"""
                 <div class="stock-card">
                     <div class="card-header"><span class="ticker-name">{row.Ticker}</span><span class="full-name">{row.Name}</span></div>
@@ -443,7 +364,6 @@ with main_tab1:
                     <div style="text-align:right;">{margin_html}</div>
                 </div>""", unsafe_allow_html=True)
                 
-                # 상세 팝업 (배당 & 실현손익 포함)
                 with st.popover("🔍", use_container_width=True):
                     st.markdown(f"**{row.Ticker} 상세 분석**")
                     st.divider()
@@ -460,10 +380,8 @@ with main_tab1:
         def make_html(df):
             rows = ""
             for _, row in df.iterrows():
-                # 보유중이 아니면 흐리게 표시하거나 스킵? 일단 다 표시하되 스타일 조정
                 op = "1.0" if row['Qty'] > 0 else "0.5"
                 c = "c-red" if row['Total_Profit'] > 0 else "c-blue" if row['Total_Profit'] < 0 else "c-gray"
-                
                 rows += f"<tr class='table-row' style='opacity:{op}'><td style='text-align:left'><b>{row['Ticker']}</b></td>"
                 rows += f"<td>{row['Eval']:,.0f}</td>"
                 rows += f"<td><span class='{c}'>{row['Unrealized_Total']:,.0f}</span></td>"
@@ -475,15 +393,28 @@ with main_tab1:
             s_t = df['Total_Profit'].sum()
             s_r = df['Realized_Profit'].sum()
             rows += f"<tr style='background:rgba(128,128,128,0.1); border-top:2px solid rgba(128,128,128,0.3); font-weight:bold;'><td style='text-align:left'>🔴 TOTAL</td><td>-</td><td>-</td><td>-</td><td>{s_r:,.0f}</td><td>{s_t:,.0f}</td><td>-</td></tr>"
-            
             return f"""<style>.c-red{{color:#FF5252}}.c-blue{{color:#448AFF}}.c-gray{{color:#9E9E9E}}table{{width:100%;border-collapse:collapse;font-size:0.85em;color:var(--text-color)}}th{{background:var(--secondary-background-color);padding:8px;text-align:right;border-bottom:2px solid rgba(128,128,128,0.3);position:sticky;top:0;white-space:nowrap}}td{{padding:8px;border-bottom:1px solid rgba(128,128,128,0.1);text-align:right}}</style><table><thead><tr><th style='text-align:left'>종목</th><th>평가액</th><th>평가손익</th><th>환손익</th><th>실현손익</th><th>총손익</th><th>안전마진</th></tr></thead><tbody>{rows}</tbody></table>"""
         st.markdown(make_html(df_combined), unsafe_allow_html=True)
         
     with sub_detail:
         st.dataframe(df_combined, use_container_width=True)
 
-# [PAGE 2] 입력 매니저 (배당 모드 복구 & 옴니 파서 통합)
+# [PAGE 2] 입력 매니저
 with main_tab2:
+    # [NEW] API 연결 테스트 섹션 (여기만 추가됨)
+    st.subheader("🛠️ API 연결 테스트")
+    if st.button("KIS API로 '리얼티인컴(O)' 가격 가져오기"):
+        try:
+            price = kis.get_current_price("O")
+            if price > 0:
+                st.success(f"✅ 성공! 리얼티인컴(O) 현재가: ${price}")
+            else:
+                st.error("❌ 실패: 장 운영시간이 아니거나, secrets.toml 설정을 확인해주세요.")
+        except Exception as e:
+            st.error(f"⚠️ 오류 발생: {e}")
+    st.divider()
+
+    # (기존 입력 매니저 로직 그대로 유지)
     st.subheader("데이터 입력")
     if st.session_state['input_log']:
         st.info("📋 세션 입력 내역")
@@ -493,11 +424,8 @@ with main_tab2:
     c1, c2 = st.columns([1, 2])
     with c1:
         date_val = st.date_input("기준 날짜", datetime.now())
-        
-        # [수정] '수동 배당' 모드 추가
         mode = st.radio("입력 모드", ["자동(카톡 뭉치)", "수동 매수", "수동 매도", "수동 배당", "수동 환전"])
         
-        # 입력 폼 동적 변경
         m_ticker, m_qty, m_price = None, 0, 0.0
         d_ticker, d_amount, d_rate = None, 0.0, 0.0
         e_krw, e_usd = 0, 0.0
@@ -506,15 +434,12 @@ with main_tab2:
             m_ticker = st.text_input("종목코드 (예: O)")
             m_qty = st.number_input("수량", min_value=1, step=1)
             m_price = st.number_input("단가 ($)", min_value=0.01, step=0.01, format="%.2f")
-        
         elif "배당" in mode:
             d_ticker = st.text_input("배당 종목 (예: O)")
             d_amount = st.number_input("배당금 ($)", min_value=0.01, step=0.01, format="%.2f")
-            # [복구] 배당 환율 입력칸 (기본값은 현재 환율 추정치)
             try: cur_rate = yf.Ticker("USDKRW=X").history(period="1d")['Close'].iloc[-1]
             except: cur_rate = 1450.0
             d_rate = st.number_input("적용 환율 (KRW/USD)", value=float(round(cur_rate, 2)), step=0.1, format="%.2f")
-
         elif "환전" in mode:
             e_krw = st.number_input("보낸 원화 (KRW)", min_value=1000, step=1000)
             e_usd = st.number_input("받은 달러 (USD)", min_value=1.0, step=1.0)
@@ -533,40 +458,32 @@ with main_tab2:
             ts_base = datetime.now().strftime('%Y%m%d%H%M%S')
             log_list = []
             
-            # --- 1. 수동 매수/매도 ---
             if ("매수" in mode or "매도" in mode) and m_ticker and m_qty > 0:
                 type_str = "Sell" if "매도" in mode else "Buy"
                 sh.worksheet("Trade_Log").append_row([str(date_val), ts_base, m_ticker.upper(), m_ticker.upper(), type_str, m_qty, m_price, 0, "수동"])
                 log_list.append(f"{type_str}: {m_ticker} {m_qty}주 (@${m_price})")
 
-            # --- 2. 수동 배당 (복구됨) ---
             elif "배당" in mode and d_ticker and d_amount > 0:
                 sh.worksheet("Dividend_Log").append_row([str(date_val), ts_base, d_ticker.upper(), d_amount, d_rate, "수동"])
                 log_list.append(f"🏦 배당: {d_ticker} ${d_amount} (@{d_rate}원)")
 
-            # --- 3. 수동 환전 ---
             elif "환전" in mode and e_krw > 0 and e_usd > 0:
                 rate = e_krw / e_usd
                 sh.worksheet("Exchange_Log").append_row([str(date_val), ts_base, "KRW_to_USD", e_krw, e_usd, rate, "", "", "수동"])
                 log_list.append(f"💱 환전: ${e_usd} (@{rate:.1f}원)")
 
-            # --- 4. 자동(카톡 뭉치) 파싱 ---
             elif "자동" in mode and raw_text:
-                # (A) 환전
                 ex_matches = re.findall(r'외화매수환전.*?￦([\d,]+).*?USD ([\d,.]+)', raw_text, re.DOTALL)
                 for idx, (krw_str, usd_str) in enumerate(ex_matches):
                     k_val = int(krw_str.replace(',','')); u_val = float(usd_str.replace(',',''))
                     sh.worksheet("Exchange_Log").append_row([str(date_val), f"{ts_base}_EX_{idx}", "KRW_to_USD", k_val, u_val, k_val/u_val, "", "", "카톡일괄"])
                     log_list.append(f"💱 환전: ${u_val:,.2f}")
 
-                # (B) 배당
                 div_matches = re.findall(r'([A-Z]+)/.*?\s+USD ([\d,.]+).*?세전배당입금', raw_text, re.DOTALL)
                 for idx, (tk, amt_str) in enumerate(div_matches):
-                    # [주의] 자동 파싱은 환율을 알 수 없으므로 1450 고정 (나중에 수정 필요할 수 있음)
                     sh.worksheet("Dividend_Log").append_row([str(date_val), f"{ts_base}_DIV_{idx}", tk, float(amt_str.replace(',','')), 1450, "카톡일괄"])
                     log_list.append(f"🏦 배당: {tk} ${amt_str}")
 
-                # (C) 매매
                 if "체결안내" in raw_text:
                     blocks = raw_text.split("한국투자증권 체결안내")
                     t_cnt = 0
