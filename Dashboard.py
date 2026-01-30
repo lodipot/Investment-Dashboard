@@ -481,7 +481,7 @@ with main_tab1:
     with sub_detail:
         st.dataframe(df_combined, use_container_width=True)
 
-# [PAGE 2] 입력 매니저 (옴니 파서 적용)
+# [PAGE 2] 입력 매니저 (배당 모드 복구 & 옴니 파서 통합)
 with main_tab2:
     st.subheader("데이터 입력")
     if st.session_state['input_log']:
@@ -491,19 +491,40 @@ with main_tab2:
 
     c1, c2 = st.columns([1, 2])
     with c1:
-        date_val = st.date_input("기준 날짜", datetime.now()) # 텍스트 내 날짜가 너무 많아 기준일 하나 잡는게 안전
-        st.caption("※ 자동 모드는 텍스트 내의 모든 거래를 위 날짜로 저장합니다.")
+        date_val = st.date_input("기준 날짜", datetime.now())
         
-        mode = st.radio("입력 모드", ["자동(카톡 뭉치)", "수동 매수", "수동 매도"])
+        # [수정] '수동 배당' 모드 추가
+        mode = st.radio("입력 모드", ["자동(카톡 뭉치)", "수동 매수", "수동 매도", "수동 배당", "수동 환전"])
         
-        # 수동 입력 폼
-        if "수동" in mode:
+        # 입력 폼 동적 변경
+        m_ticker, m_qty, m_price = None, 0, 0.0
+        d_ticker, d_amount, d_rate = None, 0.0, 0.0
+        e_krw, e_usd = 0, 0.0
+
+        if "매수" in mode or "매도" in mode:
             m_ticker = st.text_input("종목코드 (예: O)")
             m_qty = st.number_input("수량", min_value=1, step=1)
-            m_price = st.number_input("단가 ($)", min_value=0.01, step=0.01)
+            m_price = st.number_input("단가 ($)", min_value=0.01, step=0.01, format="%.2f")
+        
+        elif "배당" in mode:
+            d_ticker = st.text_input("배당 종목 (예: O)")
+            d_amount = st.number_input("배당금 ($)", min_value=0.01, step=0.01, format="%.2f")
+            # [복구] 배당 환율 입력칸 (기본값은 현재 환율 추정치)
+            try: cur_rate = yf.Ticker("USDKRW=X").history(period="1d")['Close'].iloc[-1]
+            except: cur_rate = 1450.0
+            d_rate = st.number_input("적용 환율 (KRW/USD)", value=float(round(cur_rate, 2)), step=0.1, format="%.2f")
+
+        elif "환전" in mode:
+            e_krw = st.number_input("보낸 원화 (KRW)", min_value=1000, step=1000)
+            e_usd = st.number_input("받은 달러 (USD)", min_value=1.0, step=1.0)
+            if e_usd > 0: st.caption(f"💡 적용 환율: {e_krw/e_usd:,.2f} 원/$")
             
     with c2:
-        raw_text = st.text_area("카톡 내용 붙여넣기 (광고, 잡담 섞여도 OK)", height=400)
+        if "자동" in mode:
+            raw_text = st.text_area("카톡 내용 붙여넣기 (광고, 잡담 섞여도 OK)", height=400)
+        else:
+            st.info("👈 왼쪽에서 정보를 입력해주세요.")
+            if "배당" in mode: st.write("※ 배당금은 '세후' 실제 입금액 기준으로 넣는 것을 추천합니다.")
         
     if st.button("저장 실행", type="primary"):
         try:
@@ -511,49 +532,45 @@ with main_tab2:
             ts_base = datetime.now().strftime('%Y%m%d%H%M%S')
             log_list = []
             
-            # --- 1. 수동 입력 처리 ---
-            if "수동" in mode and m_ticker and m_qty > 0:
+            # --- 1. 수동 매수/매도 ---
+            if ("매수" in mode or "매도" in mode) and m_ticker and m_qty > 0:
                 type_str = "Sell" if "매도" in mode else "Buy"
-                # 매수 시 평단 0 저장 (추후 자동계산), 매도 시에도 평단 불필요
                 sh.worksheet("Trade_Log").append_row([str(date_val), ts_base, m_ticker.upper(), m_ticker.upper(), type_str, m_qty, m_price, 0, "수동"])
                 log_list.append(f"{type_str}: {m_ticker} {m_qty}주 (@${m_price})")
 
-            # --- 2. 자동(카톡 뭉치) 파싱 ---
-            elif mode == "자동(카톡 뭉치)" and raw_text:
-                
-                # (A) 환전 파싱 (정규식: 외화매수환전...￦...USD)
-                # 여러 줄에 걸쳐 있을 수 있으므로 re.DOTALL 사용
-                ex_pattern = r'외화매수환전.*?￦([\d,]+).*?USD ([\d,.]+)'
-                ex_matches = re.findall(ex_pattern, raw_text, re.DOTALL)
-                
+            # --- 2. 수동 배당 (복구됨) ---
+            elif "배당" in mode and d_ticker and d_amount > 0:
+                sh.worksheet("Dividend_Log").append_row([str(date_val), ts_base, d_ticker.upper(), d_amount, d_rate, "수동"])
+                log_list.append(f"🏦 배당: {d_ticker} ${d_amount} (@{d_rate}원)")
+
+            # --- 3. 수동 환전 ---
+            elif "환전" in mode and e_krw > 0 and e_usd > 0:
+                rate = e_krw / e_usd
+                sh.worksheet("Exchange_Log").append_row([str(date_val), ts_base, "KRW_to_USD", e_krw, e_usd, rate, "", "", "수동"])
+                log_list.append(f"💱 환전: ${e_usd} (@{rate:.1f}원)")
+
+            # --- 4. 자동(카톡 뭉치) 파싱 ---
+            elif "자동" in mode and raw_text:
+                # (A) 환전
+                ex_matches = re.findall(r'외화매수환전.*?￦([\d,]+).*?USD ([\d,.]+)', raw_text, re.DOTALL)
                 for idx, (krw_str, usd_str) in enumerate(ex_matches):
-                    k_val = int(krw_str.replace(',',''))
-                    u_val = float(usd_str.replace(',',''))
-                    rate = k_val / u_val
-                    uid = f"{ts_base}_EX_{idx}"
-                    sh.worksheet("Exchange_Log").append_row([str(date_val), uid, "KRW_to_USD", k_val, u_val, rate, "", "", "카톡일괄"])
-                    log_list.append(f"💱 환전: ${u_val:,.2f} (@{rate:.1f}원)")
+                    k_val = int(krw_str.replace(',','')); u_val = float(usd_str.replace(',',''))
+                    sh.worksheet("Exchange_Log").append_row([str(date_val), f"{ts_base}_EX_{idx}", "KRW_to_USD", k_val, u_val, k_val/u_val, "", "", "카톡일괄"])
+                    log_list.append(f"💱 환전: ${u_val:,.2f}")
 
-                # (B) 배당 파싱 (정규식: 티커...USD...세전배당입금)
-                # 예: O/리얼티 인컴 \n USD 3.24 \n 세전배당입금
-                div_pattern = r'([A-Z]+)/.*?\s+USD ([\d,.]+).*?세전배당입금'
-                div_matches = re.findall(div_pattern, raw_text, re.DOTALL)
-                
+                # (B) 배당
+                div_matches = re.findall(r'([A-Z]+)/.*?\s+USD ([\d,.]+).*?세전배당입금', raw_text, re.DOTALL)
                 for idx, (tk, amt_str) in enumerate(div_matches):
-                    val_amt = float(amt_str.replace(',',''))
-                    uid = f"{ts_base}_DIV_{idx}"
-                    # 배당 환율은 1450 고정 혹은 추후 수정 필요
-                    sh.worksheet("Dividend_Log").append_row([str(date_val), uid, tk, val_amt, 1450, "카톡일괄"])
-                    log_list.append(f"🏦 배당: {tk} ${val_amt}")
+                    # [주의] 자동 파싱은 환율을 알 수 없으므로 1450 고정 (나중에 수정 필요할 수 있음)
+                    sh.worksheet("Dividend_Log").append_row([str(date_val), f"{ts_base}_DIV_{idx}", tk, float(amt_str.replace(',','')), 1450, "카톡일괄"])
+                    log_list.append(f"🏦 배당: {tk} ${amt_str}")
 
-                # (C) 주식 체결 파싱 (split 방식 유지 - 가장 정확함)
+                # (C) 매매
                 if "체결안내" in raw_text:
                     blocks = raw_text.split("한국투자증권 체결안내")
-                    trade_count = 0
+                    t_cnt = 0
                     for block in blocks:
                         if "종목명" not in block: continue
-                        
-                        # 키워드 파싱
                         type_match = re.search(r'\*매매구분:(매수|매도)', block)
                         tk_match = re.search(r'\*종목명:([A-Z]+)', block)
                         qt_match = re.search(r'\*체결수량:([\d]+)', block)
@@ -561,22 +578,15 @@ with main_tab2:
                         
                         if type_match and tk_match and qt_match and pr_match:
                             t_type = "Buy" if type_match.group(1) == "매수" else "Sell"
-                            ticker = tk_match.group(1)
-                            qty = int(qt_match.group(1))
-                            price = float(pr_match.group(1))
-                            
-                            uid = f"{ts_base}_TR_{trade_count}"
-                            sh.worksheet("Trade_Log").append_row([str(date_val), uid, ticker, ticker, t_type, qty, price, 0, "카톡일괄"])
-                            log_list.append(f"🛒 {t_type}: {ticker} {qty}주")
-                            trade_count += 1
+                            sh.worksheet("Trade_Log").append_row([str(date_val), f"{ts_base}_TR_{t_cnt}", tk_match.group(1), tk_match.group(1), t_type, int(qt_match.group(1)), float(pr_match.group(1)), 0, "카톡일괄"])
+                            log_list.append(f"🛒 {t_type}: {tk_match.group(1)}")
+                            t_cnt += 1
 
-            # 결과 처리
             if log_list:
                 st.session_state['input_log'].extend(log_list)
-                st.success(f"✅ 총 {len(log_list)}건의 데이터를 성공적으로 저장했습니다!")
+                st.success(f"✅ 저장 완료! ({len(log_list)}건)")
                 st.balloons()
-                st.cache_data.clear() # 데이터 갱신
-            else:
-                st.error("분석된 내용이 없습니다. 텍스트 형식을 확인해주세요.")
-                
-        except Exception as e: st.error(f"처리 중 오류 발생: {str(e)}")
+                st.cache_data.clear()
+            else: st.error("입력 정보를 확인해주세요.")
+            
+        except Exception as e: st.error(f"오류: {str(e)}")
