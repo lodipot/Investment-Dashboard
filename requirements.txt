@@ -4,3 +4,4 @@ yfinance
 gspread
 oauth2client
 openpyxl
+requests
