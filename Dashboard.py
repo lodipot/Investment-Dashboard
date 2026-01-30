@@ -481,7 +481,7 @@ with main_tab1:
     with sub_detail:
         st.dataframe(df_combined, use_container_width=True)
 
-# [PAGE 2] 입력 매니저
+# [PAGE 2] 입력 매니저 (옴니 파서 적용)
 with main_tab2:
     st.subheader("데이터 입력")
     if st.session_state['input_log']:
@@ -491,54 +491,92 @@ with main_tab2:
 
     c1, c2 = st.columns([1, 2])
     with c1:
-        date_val = st.date_input("날짜", datetime.now())
-        mode = st.radio("입력 모드", ["자동(카톡)", "매수(Buy)", "매도(Sell)", "배당", "환전"])
+        date_val = st.date_input("기준 날짜", datetime.now()) # 텍스트 내 날짜가 너무 많아 기준일 하나 잡는게 안전
+        st.caption("※ 자동 모드는 텍스트 내의 모든 거래를 위 날짜로 저장합니다.")
         
-        # 매도/매수 수동 입력 폼
-        if mode in ["매수(Buy)", "매도(Sell)"]:
+        mode = st.radio("입력 모드", ["자동(카톡 뭉치)", "수동 매수", "수동 매도"])
+        
+        # 수동 입력 폼
+        if "수동" in mode:
             m_ticker = st.text_input("종목코드 (예: O)")
             m_qty = st.number_input("수량", min_value=1, step=1)
             m_price = st.number_input("단가 ($)", min_value=0.01, step=0.01)
             
     with c2:
-        raw_text = st.text_area("카톡 붙여넣기 (자동 모드)", height=150)
+        raw_text = st.text_area("카톡 내용 붙여넣기 (광고, 잡담 섞여도 OK)", height=400)
         
     if st.button("저장 실행", type="primary"):
         try:
             sh = get_client()
-            ts = datetime.now().strftime('%Y%m%d%H%M%S')
-            log_msg = ""
+            ts_base = datetime.now().strftime('%Y%m%d%H%M%S')
+            log_list = []
             
-            # 1. 수동 입력 처리
-            if mode == "매도(Sell)" and m_ticker and m_qty > 0:
-                sh.worksheet("Trade_Log").append_row([str(date_val), ts, m_ticker.upper(), m_ticker.upper(), "Sell", m_qty, m_price, 0, "수동입력"])
-                log_msg = f"매도: {m_ticker} {m_qty}주 (@${m_price})"
-            
-            elif mode == "매수(Buy)" and m_ticker and m_qty > 0:
-                # 매수 시 평단 필요하지만, 계산함수가 복잡하므로 일단 0으로 넣고 나중에 재계산됨 (Display logic handles it)
-                # or fetch current metrics if needed. For simplicity, storing 0 or estimated.
-                sh.worksheet("Trade_Log").append_row([str(date_val), ts, m_ticker.upper(), m_ticker.upper(), "Buy", m_qty, m_price, 0, "수동입력"])
-                log_msg = f"매수: {m_ticker} {m_qty}주 (@${m_price})"
+            # --- 1. 수동 입력 처리 ---
+            if "수동" in mode and m_ticker and m_qty > 0:
+                type_str = "Sell" if "매도" in mode else "Buy"
+                # 매수 시 평단 0 저장 (추후 자동계산), 매도 시에도 평단 불필요
+                sh.worksheet("Trade_Log").append_row([str(date_val), ts_base, m_ticker.upper(), m_ticker.upper(), type_str, m_qty, m_price, 0, "수동"])
+                log_list.append(f"{type_str}: {m_ticker} {m_qty}주 (@${m_price})")
 
-            # 2. 자동 파싱 (기존 로직)
-            elif mode == "자동(카톡)" and raw_text:
-                if "배당" in raw_text:
-                    tk = re.search(r'([A-Z]+)/', raw_text); amt = re.search(r'USD ([\d,.]+)', raw_text)
-                    if tk and amt:
-                        sh.worksheet("Dividend_Log").append_row([str(date_val), ts, tk.group(1), float(amt.group(1).replace(',','')), 1450, "카톡"]) # 환율은 추후 수정 필요할수도
-                        log_msg = f"배당: {tk.group(1)}"
-                elif "체결" in raw_text:
-                    # 매수/매도 구분 로직 필요하나 일단 매수 가정 (카톡 양식에 따라 다름)
-                    tk = re.search(r'\*종목명:([A-Z]+)/', raw_text); qt = re.search(r'\*체결수량:([\d]+)', raw_text); pr = re.search(r'\*체결단가:USD ([\d.]+)', raw_text)
-                    if tk:
-                        type_str = "Sell" if "매도" in raw_text else "Buy" # 단순 키워드 체크
-                        sh.worksheet("Trade_Log").append_row([str(date_val), ts, tk.group(1), tk.group(1), type_str, int(qt.group(1)), float(pr.group(1)), 0, "카톡"])
-                        log_msg = f"{type_str}: {tk.group(1)}"
-            
-            if log_msg:
-                st.session_state['input_log'].append(log_msg)
-                st.success(log_msg)
-                st.cache_data.clear()
-            else: st.error("입력 정보 부족")
-            
-        except Exception as e: st.error(str(e))
+            # --- 2. 자동(카톡 뭉치) 파싱 ---
+            elif mode == "자동(카톡 뭉치)" and raw_text:
+                
+                # (A) 환전 파싱 (정규식: 외화매수환전...￦...USD)
+                # 여러 줄에 걸쳐 있을 수 있으므로 re.DOTALL 사용
+                ex_pattern = r'외화매수환전.*?￦([\d,]+).*?USD ([\d,.]+)'
+                ex_matches = re.findall(ex_pattern, raw_text, re.DOTALL)
+                
+                for idx, (krw_str, usd_str) in enumerate(ex_matches):
+                    k_val = int(krw_str.replace(',',''))
+                    u_val = float(usd_str.replace(',',''))
+                    rate = k_val / u_val
+                    uid = f"{ts_base}_EX_{idx}"
+                    sh.worksheet("Exchange_Log").append_row([str(date_val), uid, "KRW_to_USD", k_val, u_val, rate, "", "", "카톡일괄"])
+                    log_list.append(f"💱 환전: ${u_val:,.2f} (@{rate:.1f}원)")
+
+                # (B) 배당 파싱 (정규식: 티커...USD...세전배당입금)
+                # 예: O/리얼티 인컴 \n USD 3.24 \n 세전배당입금
+                div_pattern = r'([A-Z]+)/.*?\s+USD ([\d,.]+).*?세전배당입금'
+                div_matches = re.findall(div_pattern, raw_text, re.DOTALL)
+                
+                for idx, (tk, amt_str) in enumerate(div_matches):
+                    val_amt = float(amt_str.replace(',',''))
+                    uid = f"{ts_base}_DIV_{idx}"
+                    # 배당 환율은 1450 고정 혹은 추후 수정 필요
+                    sh.worksheet("Dividend_Log").append_row([str(date_val), uid, tk, val_amt, 1450, "카톡일괄"])
+                    log_list.append(f"🏦 배당: {tk} ${val_amt}")
+
+                # (C) 주식 체결 파싱 (split 방식 유지 - 가장 정확함)
+                if "체결안내" in raw_text:
+                    blocks = raw_text.split("한국투자증권 체결안내")
+                    trade_count = 0
+                    for block in blocks:
+                        if "종목명" not in block: continue
+                        
+                        # 키워드 파싱
+                        type_match = re.search(r'\*매매구분:(매수|매도)', block)
+                        tk_match = re.search(r'\*종목명:([A-Z]+)', block)
+                        qt_match = re.search(r'\*체결수량:([\d]+)', block)
+                        pr_match = re.search(r'\*체결단가:USD ([\d.]+)', block)
+                        
+                        if type_match and tk_match and qt_match and pr_match:
+                            t_type = "Buy" if type_match.group(1) == "매수" else "Sell"
+                            ticker = tk_match.group(1)
+                            qty = int(qt_match.group(1))
+                            price = float(pr_match.group(1))
+                            
+                            uid = f"{ts_base}_TR_{trade_count}"
+                            sh.worksheet("Trade_Log").append_row([str(date_val), uid, ticker, ticker, t_type, qty, price, 0, "카톡일괄"])
+                            log_list.append(f"🛒 {t_type}: {ticker} {qty}주")
+                            trade_count += 1
+
+            # 결과 처리
+            if log_list:
+                st.session_state['input_log'].extend(log_list)
+                st.success(f"✅ 총 {len(log_list)}건의 데이터를 성공적으로 저장했습니다!")
+                st.balloons()
+                st.cache_data.clear() # 데이터 갱신
+            else:
+                st.error("분석된 내용이 없습니다. 텍스트 형식을 확인해주세요.")
+                
+        except Exception as e: st.error(f"처리 중 오류 발생: {str(e)}")
