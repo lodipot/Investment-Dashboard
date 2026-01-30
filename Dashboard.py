@@ -113,21 +113,55 @@ def load_data():
         return trade_df, exchange_df, krw_assets_df, etf_df, div_df
     except: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+# [수정된 함수] KIS API를 우선 사용하되, 실패 시 yfinance로 방어하는 로직
 def get_market_data(tickers):
-    fx = 1450.0; fx_status = "Fallback"
+    # 1. 환율 가져오기 (안전성을 위해 yfinance 유지)
+    fx = 1450.0
+    fx_status = "Fallback"
     try:
         fx_hist = yf.Ticker("USDKRW=X").history(period="1d")
-        if not fx_hist.empty: fx = fx_hist['Close'].iloc[-1]; fx_status = "Live"
+        if not fx_hist.empty:
+            fx = fx_hist['Close'].iloc[-1]
+            fx_status = "Live (Yahoo)"
     except: pass
     
+    # 2. 주식 현재가 가져오기 (KIS -> yfinance 하이브리드)
     data_map = {}
+    
     if tickers:
         valid_tickers = [t for t in tickers if t != '💵 USD CASH']
+        
+        # 진행 상황을 보여주기 위한 빈 텍스트 상자 (선택사항)
+        # prog_text = st.empty() 
+        
         for t in valid_tickers:
+            price = 0.0
+            source = ""
+            
+            # [1차 시도] KIS API (실시간)
             try:
-                hist = yf.Ticker(t).history(period="1d")
-                if not hist.empty: data_map[t] = hist['Close'].iloc[-1]
-            except: pass
+                price = kis.get_current_price(t)
+                if price > 0:
+                    source = "KIS"
+            except:
+                price = 0.0
+            
+            # [2차 시도] 실패했다면 yfinance (15분 지연)
+            if price == 0:
+                try:
+                    hist = yf.Ticker(t).history(period="1d")
+                    if not hist.empty:
+                        price = hist['Close'].iloc[-1]
+                        source = "Yahoo"
+                except:
+                    price = 0.0 # 정말 다 실패하면 0
+            
+            # 결과 저장
+            if price > 0:
+                data_map[t] = price
+                # (디버깅용) 어떤 소스에서 가져왔는지 로그에 찍고 싶다면 아래 주석 해제
+                # print(f"{t}: {price} via {source}")
+
     return fx, fx_status, data_map
 
 def calculate_portfolio_state(trade_df, exchange_df, div_df):
