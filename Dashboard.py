@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import textwrap
 import re
+import KIS_API_Manager as kis  # 방금 만든 파일 불러오기
 
 # -------------------------------------------------------------------
 # 1. 초기 설정 & 스타일 (Samsung Browser & Dark Mode Fix)
