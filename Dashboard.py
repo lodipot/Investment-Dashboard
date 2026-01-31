@@ -2,21 +2,21 @@ import streamlit as st
 import pandas as pd
 import requests
 import gspread
-import yfinance as yf
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 import KIS_API_Manager as kis
 
-st.set_page_config(page_title="DB Migration (Hardcoded Patch)", page_icon="🧬", layout="wide")
-st.title("🧬 DB 마이그레이션 (과거 내역 + API 최신)")
-st.caption("1월 17일까지의 수기 데이터(하드코딩)와 그 이후의 API 데이터를 결합하여 DB를 재구축합니다.")
+st.set_page_config(page_title="Dollar Reservoir Builder", page_icon="💧", layout="wide")
+st.title("💧 달러 저수지(Dollar Reservoir) 재구축")
+st.caption("수기 데이터와 API 데이터를 결합하고, '이동평균 환율'을 정밀하게 재계산하여 DB를 동기화합니다.")
 
 # -----------------------------------------------------------
 # 0. 하드코딩된 과거 데이터 (1월 17일까지)
 # -----------------------------------------------------------
-# [Date, Order_ID, Category, Type, Ticker, Qty, Price, Amount, Rate, Note]
-past_data_list = [
+# 구조: [Date, Order_ID, Category, Type, Ticker, Qty, Price, Amount, Rate, Note]
+# 수정사항: 배당금 3.24 -> 2.75 (세후) 반영
+past_data_source = [
     ['2025-12-30', '1', 'Exchange', 'KRW_to_USD', 'USD', 691.8, 0.0, 691.8, 1445.49, '카톡일괄입력'],
     ['2025-12-31', '2', 'Exchange', 'KRW_to_USD', 'USD', 690.87, 0.0, 690.87, 1447.44, '카톡일괄입력'],
     ['2025-12-31', '3', 'Trade', 'Buy', 'O', 12.0, 57.01, 0.0, 0.0, '카톡일괄입력'],
@@ -46,177 +46,255 @@ past_data_list = [
     ['2026-01-14', '20260126023549', 'Trade', 'Buy', 'GOOGL', 1.0, 334.5, 0.0, 0.0, '카톡파싱'],
     ['2026-01-14', '20260126023624', 'Trade', 'Buy', 'JEPI', 11.0, 58.17, 0.0, 0.0, '카톡파싱'],
     ['2026-01-14', '27', 'Trade', 'Buy', 'JEPQ', 24.0, 59.13, 0.0, 0.0, '카톡파싱'],
-    ['2026-01-16', '20260126024542', 'Dividend', 'Dividend', 'O', 0.0, 0.0, 3.24, 1469.7, '카톡파싱'],
+    # [수정] 배당금 3.24 -> 2.75 (세후 반영)
+    ['2026-01-16', '20260126024542', 'Dividend', 'Dividend', 'O', 0.0, 0.0, 2.75, 1469.7, '카톡파싱'],
     ['2026-01-16', '20260126024335', 'Trade', 'Buy', 'JEPQ', 4.0, 59.01, 0.0, 0.0, '카톡파싱'],
     ['2026-01-17', '20260126024934', 'Trade', 'Buy', 'GOOGL', 1.0, 329.7, 0.0, 0.0, '카톡파싱'],
     ['2026-01-17', '20260126025018', 'Trade', 'Buy', 'JEPI', 6.0, 58.41, 0.0, 0.0, '카톡파싱']
 ]
 
 # -----------------------------------------------------------
-# 1. API 설정
+# 1. API 데이터 수집 (전체 구간)
 # -----------------------------------------------------------
-token = kis.get_access_token()
-base_url = st.secrets["kis_api"]["URL_BASE"].strip()
-if base_url.endswith("/"): base_url = base_url[:-1]
-
-app_key = st.secrets["kis_api"]["APP_KEY"]
-app_secret = st.secrets["kis_api"]["APP_SECRET"]
-cano = st.secrets["kis_api"]["CANO"]
-acnt_prdt_cd = st.secrets["kis_api"]["ACNT_PRDT_CD"]
-
-# -----------------------------------------------------------
-# 2. API 데이터 수집 (2026-01-18 이후)
-# -----------------------------------------------------------
-def fetch_recent_api_data():
-    trade_list = []
+def fetch_all_trades():
+    token = kis.get_access_token()
+    base_url = st.secrets["kis_api"]["URL_BASE"].strip()
+    if base_url.endswith("/"): base_url = base_url[:-1]
     
-    path = "/uapi/overseas-stock/v1/trading/inquire-period-trans"
     headers = {
         "content-type": "application/json",
         "authorization": f"Bearer {token}",
-        "appkey": app_key,
-        "appsecret": app_secret,
+        "appkey": st.secrets["kis_api"]["APP_KEY"],
+        "appsecret": st.secrets["kis_api"]["APP_SECRET"],
         "tr_id": "CTOS4001R"
     }
     
-    # [중요] 1월 17일 이후부터 조회
     params = {
-        "CANO": cano, "ACNT_PRDT_CD": acnt_prdt_cd,
-        "ERLM_STRT_DT": "20260118", "ERLM_END_DT": datetime.now().strftime("%Y%m%d"),
-        "SLL_BUY_DVSN_CD": "00", "CCLD_DVSN": "00",
-        "OVRS_EXCG_CD": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+        "CANO": st.secrets["kis_api"]["CANO"],
+        "ACNT_PRDT_CD": st.secrets["kis_api"]["ACNT_PRDT_CD"],
+        "ERLM_STRT_DT": "20240101", 
+        "ERLM_END_DT": datetime.now().strftime("%Y%m%d"),
+        "SLL_BUY_DVSN_CD": "00", "CCLD_DVSN": "00", "OVRS_EXCG_CD": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
     }
     
+    trade_list = []
+    
     try:
-        res = requests.get(f"{base_url}{path}", headers=headers, params=params)
-        data = res.json()
-        
-        if res.status_code == 200 and data['rt_cd'] == '0':
-            for item in data['output1']:
-                dvsn_name = item.get('sll_buy_dvsn_name', '')
-                if '매수' in dvsn_name or '매도' in dvsn_name:
-                    # 날짜
-                    dt_str = item.get('trad_dt') or item.get('tr_dt')
-                    dt_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
-                    
-                    ticker = item.get('pdno', '')
-                    name = item.get('ovrs_item_name', '')
-                    qty = int(float(item.get('ccld_qty', '0')))
-                    price = float(item.get('ft_ccld_unpr2', '0'))
-                    if price == 0: price = float(item.get('ovrs_stck_ccld_unpr', '0'))
-                    
-                    t_type = "Buy" if "매수" in dvsn_name else "Sell"
-                    order_id = f"API_{dt_str}_{ticker}_{qty}"
-                    
-                    # [Date, Order_ID, Category, Type, Ticker, Qty, Price, Amount, Rate, Note]
-                    trade_list.append([
-                        dt_fmt, order_id, 'Trade', t_type, ticker, qty, price, 0.0, 0.0, 'API_Update'
-                    ])
+        # 페이지네이션 처리 (거래가 많을 수 있으므로)
+        while True:
+            res = requests.get(f"{base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers=headers, params=params)
+            data = res.json()
+            
+            if data['rt_cd'] == '0':
+                for item in data['output1']:
+                    dvsn = item.get('sll_buy_dvsn_name', '')
+                    if '매수' in dvsn or '매도' in dvsn:
+                        dt_str = item.get('trad_dt') or item.get('tr_dt')
+                        dt_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
+                        
+                        qty = int(float(item['ccld_qty']))
+                        price = float(item.get('ft_ccld_unpr2', 0))
+                        if price == 0: price = float(item.get('ovrs_stck_ccld_unpr', 0))
+                        
+                        trade_list.append({
+                            'Date': dt_fmt,
+                            'Ticker': item['pdno'],
+                            'Name': item['ovrs_item_name'],
+                            'Type': "Buy" if "매수" in dvsn else "Sell",
+                            'Qty': qty,
+                            'Price': price,
+                            'Raw_Date': dt_str
+                        })
+                
+                # 다음 페이지 확인
+                ctx = data.get('ctx_area_fk100', '').strip()
+                if not ctx: break
+                params['CTX_AREA_FK100'] = ctx
+                time.sleep(0.2)
+            else:
+                break
+                
     except Exception as e:
         st.error(f"API 조회 중 오류: {e}")
         
-    return trade_list
+    return pd.DataFrame(trade_list)
 
 # -----------------------------------------------------------
-# 3. 데이터 병합 및 시트 저장
+# 2. 데이터 처리 및 계산 (핵심)
 # -----------------------------------------------------------
-def migrate_data():
-    # 1. 과거 데이터 로드
-    df_past = pd.DataFrame(past_data_list, columns=[
-        'Date', 'Order_ID', 'Category', 'Type', 'Ticker', 'Qty', 'Price', 'Amount', 'Rate', 'Note'
-    ])
+def process_data(api_df):
+    # 1. 과거 데이터 DF 변환
+    past_df = pd.DataFrame(past_data_source, columns=['Date', 'Order_ID', 'Category', 'Type', 'Ticker', 'Qty', 'Price', 'Amount', 'Rate', 'Note'])
     
-    # 2. 최신 API 데이터 로드 (역순 정렬 방지)
-    api_data = fetch_recent_api_data()
-    # API 데이터는 최신순으로 올 수 있으므로 날짜순 정렬 필요
-    api_data.sort(key=lambda x: x[0]) 
+    # 2. API 데이터 중 1월 17일 이후 것만 추출
+    cutoff_date = "2026-01-17"
+    new_api_df = api_df[api_df['Date'] > cutoff_date].copy()
     
-    df_new = pd.DataFrame(api_data, columns=df_past.columns)
-    
-    # 3. 병합
-    df_final = pd.concat([df_past, df_new], ignore_index=True)
-    
-    # 4. 시트별 분리
-    # Trade_Log: Category == 'Trade'
-    df_trade = df_final[df_final['Category'] == 'Trade'].copy()
-    # 필요한 컬럼만 선택 및 이름 변경 (Amount는 Trade에서 안 씀, Rate는 Exchange_Rate)
-    df_trade = df_trade[['Date', 'Order_ID', 'Ticker', 'Ticker', 'Type', 'Qty', 'Price', 'Rate', 'Note']] 
-    # Ticker가 두 번 들어갔는데 하나는 Name 자리. Name을 API에서 가져오거나 수기 데이터에 있으니 그걸 써야 함.
-    # 수기 데이터에는 Ticker가 코드고 Name이 없음 (위 리스트에서 Ticker 자리에 코드가 들어감).
-    # 위 리스트 구조: [Date, Order_ID, Category, Type, Ticker, Qty, Price, Amount, Rate, Note]
-    # Trade_Log 구조: [Date, Order_ID, Ticker, Name, Type, Qty, Price_USD, Exchange_Rate, Note]
-    # 위 리스트엔 Name이 없습니다. Name은 비워두거나 Ticker로 채웁니다.
-    
-    trade_rows = []
-    for _, row in df_final[df_final['Category'] == 'Trade'].iterrows():
-        trade_rows.append([
-            row['Date'], row['Order_ID'], row['Ticker'], row['Ticker'], # Name 대신 Ticker 임시 사용
-            row['Type'], row['Qty'], row['Price'], row['Rate'], row['Note']
+    # 3. 새로운 API 데이터를 표준 포맷으로 변환
+    new_rows = []
+    for _, row in new_api_df.iterrows():
+        order_id = f"API_{row['Raw_Date']}_{row['Ticker']}_{row['Qty']}"
+        new_rows.append([
+            row['Date'], order_id, 'Trade', row['Type'], row['Ticker'], 
+            row['Qty'], row['Price'], 0.0, 0.0, 'API_Update'
         ])
         
-    # Exchange_Log
-    # 구조: [Date, Order_ID, Type, KRW_Amount, USD_Amount, Ex_Rate, Avg_Rate, Balance, Note]
-    # 위 리스트 Exchange: [Date, Order_ID, 'Exchange', 'KRW_to_USD', 'USD', Qty(USD), 0, Amount(USD), Rate, Note]
-    exchange_rows = []
-    for _, row in df_final[df_final['Category'] == 'Exchange'].iterrows():
-        usd_amt = row['Amount']
-        krw_amt = usd_amt * row['Rate'] # 역산 (정확하진 않지만 근사치)
-        exchange_rows.append([
-            row['Date'], row['Order_ID'], row['Type'], 
-            int(krw_amt), usd_amt, row['Rate'], 0, 0, row['Note'] # Avg_Rate, Balance는 추후 계산
-        ])
+    new_df = pd.DataFrame(new_rows, columns=past_df.columns)
+    
+    # 4. 전체 데이터 병합 및 정렬
+    full_df = pd.concat([past_df, new_df], ignore_index=True)
+    full_df['Date'] = pd.to_datetime(full_df['Date'])
+    full_df = full_df.sort_values(['Date', 'Order_ID']).reset_index(drop=True)
+    
+    # 5. 달러 저수지(이동평균) 계산
+    # 변수 초기화
+    total_usd = 0.0
+    total_krw = 0.0
+    avg_rate = 0.0
+    
+    # 결과 저장용 리스트
+    final_trade = []
+    final_exchange = []
+    final_dividend = []
+    
+    for idx, row in full_df.iterrows():
+        cat = row['Category']
+        qty = float(row['Qty'])
+        price = float(row['Price'])
+        amount = float(row['Amount'])
+        rate = float(row['Rate'])
         
-    # Dividend_Log
-    # 구조: [Date, Order_ID, Ticker, Amount_USD, Ex_Rate, Note]
-    div_rows = []
-    for _, row in df_final[df_final['Category'] == 'Dividend'].iterrows():
-        div_rows.append([
-            row['Date'], row['Order_ID'], row['Ticker'], row['Amount'], row['Rate'], row['Note']
-        ])
+        # [Case A] 환전 (KRW -> USD) : 물 채우기
+        if cat == 'Exchange':
+            usd_in = amount # USD_Amount
+            krw_in = usd_in * rate # 투입 원화 (실제 환율 적용)
+            
+            total_usd += usd_in
+            total_krw += krw_in
+            
+            # 이동평균 갱신
+            if total_usd > 0:
+                avg_rate = total_krw / total_usd
+            
+            # Exchange_Log에 기록 (Avg_Rate, Balance 갱신)
+            final_exchange.append([
+                row['Date'].strftime('%Y-%m-%d'), row['Order_ID'], row['Type'],
+                int(krw_in), usd_in, rate, round(avg_rate, 8), round(total_usd, 2), row['Note']
+            ])
+            
+        # [Case B] 배당 (Dividend) : 물 채우기 (무상 입금 효과)
+        elif cat == 'Dividend':
+            usd_in = amount # 세후 배당금
+            # 원화 투입은 0원으로 간주 (평단가 인하 효과)
+            
+            total_usd += usd_in
+            # total_krw는 변하지 않음
+            
+            # 이동평균 갱신
+            if total_usd > 0:
+                avg_rate = total_krw / total_usd
+                
+            final_dividend.append([
+                row['Date'].strftime('%Y-%m-%d'), row['Order_ID'], row['Ticker'],
+                usd_in, rate, row['Note'] # Rate는 당시 환율 기록용
+            ])
+            
+        # [Case C] 매매 (Trade) : 물 쓰기
+        elif cat == 'Trade':
+            if row['Type'] == 'Buy':
+                buy_amt_usd = qty * price
+                
+                # 이동평균 환율은 '유지' (물 농도는 그대로)
+                # 단, 잔고(USD, KRW)는 차감해야 함
+                total_usd -= buy_amt_usd
+                total_krw -= (buy_amt_usd * avg_rate) # 현재 평단가 비율대로 원화 차감
+                
+                # Trade_Log에 '당시 평단가(Ex_Avg_Rate)' 기록
+                final_trade.append([
+                    row['Date'].strftime('%Y-%m-%d'), row['Order_ID'], row['Ticker'],
+                    row['Ticker'], # Name (API에서 가져오거나 Ticker로 대체)
+                    row['Type'], qty, price, round(avg_rate, 8), row['Note']
+                ])
+                
+            elif row['Type'] == 'Sell':
+                sell_amt_usd = qty * price
+                
+                # 매도 시: 달러가 다시 들어옴 -> 이게 수익 실현인지 원금 회수인지 복잡함
+                # '달러 저수지' 관점에서는: 
+                # 1. 달러 잔고 증가 (+판 금액)
+                # 2. 원화 잔고 증가 (+판 금액 * 당시 평단가? 아니면 판 시점 환율?)
+                # 사용자 정의에 따라 다르지만, 보통 '달러 예수금'이 늘어나는 것이므로
+                # 매수와 반대로 처리 (단가 변화 없음, 수량만 증가)
+                
+                total_usd += sell_amt_usd
+                total_krw += (sell_amt_usd * avg_rate)
+                
+                final_trade.append([
+                    row['Date'].strftime('%Y-%m-%d'), row['Order_ID'], row['Ticker'],
+                    row['Ticker'], row['Type'], qty, price, round(avg_rate, 8), row['Note']
+                ])
 
-    # 5. 구글 시트 저장
-    try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        sh = client.open("Investment_Dashboard_DB")
-        
-        # Trade_Log
-        ws_t = sh.worksheet("Trade_Log")
-        ws_t.clear()
-        ws_t.append_row(["Date", "Order_ID", "Ticker", "Name", "Type", "Qty", "Price_USD", "Exchange_Rate", "Note"])
-        if trade_rows: ws_t.append_rows(trade_rows)
-        
-        # Exchange_Log
-        ws_e = sh.worksheet("Exchange_Log")
-        ws_e.clear()
-        ws_e.append_row(["Date", "Order_ID", "Type", "KRW_Amount", "USD_Amount", "Ex_Rate", "Avg_Rate", "Balance", "Note"])
-        if exchange_rows: ws_e.append_rows(exchange_rows)
-        
-        # Dividend_Log
-        ws_d = sh.worksheet("Dividend_Log")
-        ws_d.clear()
-        ws_d.append_row(["Date", "Order_ID", "Ticker", "Amount_USD", "Ex_Rate", "Note"])
-        if div_rows: ws_d.append_rows(div_rows)
-        
-        return True, len(trade_rows), len(exchange_rows), len(div_rows)
-        
-    except Exception as e:
-        st.error(f"시트 저장 실패: {e}")
-        return False, 0, 0, 0
+    return final_trade, final_exchange, final_dividend, api_df
 
 # -----------------------------------------------------------
-# 4. UI
+# 3. UI 실행
 # -----------------------------------------------------------
-if st.button("🚀 DB 마이그레이션 실행 (Hardcode + API)"):
-    with st.spinner("데이터 병합 및 저장 중..."):
-        success, t_cnt, e_cnt, d_cnt = migrate_data()
-        
-    if success:
-        st.balloons()
-        st.success("✅ DB 재구축 완료!")
-        st.write(f"- Trade_Log: {t_cnt}건")
-        st.write(f"- Exchange_Log: {e_cnt}건")
-        st.write(f"- Dividend_Log: {d_cnt}건")
-        st.info("이제 Dashboard.py를 STEP 3(최종 대시보드) 코드로 교체하세요.")
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("1. 데이터 검증 (Verify)"):
+        with st.spinner("API 조회 및 비교 중..."):
+            api_df = fetch_all_trades()
+            
+            # 검증 로직: 1/17 이전 데이터 비교
+            cutoff = pd.to_datetime("2026-01-17")
+            api_past = api_df[pd.to_datetime(api_df['Date']) <= cutoff]
+            
+            st.subheader("🔎 데이터 교차 검증 결과")
+            st.write(f"API에서 조회된 1/17 이전 매매 내역: **{len(api_past)}건**")
+            st.dataframe(api_past)
+            
+            st.info("위 내역과 사용자님의 수기 내역(하드코딩)을 비교해 보세요. 일치한다면 우측 실행 버튼을 누르세요.")
+
+with col2:
+    if st.button("2. 실행 및 저장 (Execute & Save)"):
+        with st.spinner("데이터 병합 및 환율 재계산 중..."):
+            # API 다시 조회 (세션 없다고 가정하고 안전하게)
+            api_df = fetch_all_trades()
+            
+            t_rows, e_rows, d_rows, _ = process_data(api_df)
+            
+            # 구글 시트 저장
+            try:
+                scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+                creds_dict = dict(st.secrets["gcp_service_account"])
+                creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+                client = gspread.authorize(creds)
+                sh = client.open("Investment_Dashboard_DB")
+                
+                # 1. Trade_Log (Ex_Avg_Rate 적용)
+                ws_t = sh.worksheet("Trade_Log")
+                ws_t.clear()
+                ws_t.append_row(["Date", "Order_ID", "Ticker", "Name", "Type", "Qty", "Price_USD", "Ex_Avg_Rate", "Note"])
+                if t_rows: ws_t.append_rows(t_rows)
+                
+                # 2. Exchange_Log (Avg_Rate, Balance 갱신)
+                ws_e = sh.worksheet("Exchange_Log")
+                ws_e.clear()
+                ws_e.append_row(["Date", "Order_ID", "Type", "KRW_Amount", "USD_Amount", "Ex_Rate", "Avg_Rate", "Balance", "Note"])
+                if e_rows: ws_e.append_rows(e_rows)
+                
+                # 3. Dividend_Log
+                ws_d = sh.worksheet("Dividend_Log")
+                ws_d.clear()
+                ws_d.append_row(["Date", "Order_ID", "Ticker", "Amount_USD", "Ex_Rate", "Note"])
+                if d_rows: ws_d.append_rows(d_rows)
+                
+                st.balloons()
+                st.success("🏆 DB 업데이트 완료! (환율 8자리 정밀 계산 적용됨)")
+                
+                st.write("### 결과 미리보기 (Trade_Log)")
+                st.dataframe(pd.DataFrame(t_rows, columns=["Date", "ID", "Ticker", "Name", "Type", "Qty", "Price", "Avg_Rate", "Note"]))
+                
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
