@@ -214,4 +214,24 @@ if st.button("🚀 데이터 불러오기 (자동 감지)"):
             else:
                 st.warning("👉 '잔고 스냅샷' 모드로 데이터를 가져왔습니다.")
         else:
-            st
+            st.success("✅ '거래 내역'을 완벽하게 가져왔습니다!")
+
+        # 결과 보여주기
+        st.write(f"📊 매매 데이터: {len(t_data)}건")
+        st.dataframe(pd.DataFrame(t_data, columns=["Date", "ID", "Ticker", "Name", "Type", "Qty", "Price", "Rate", "Note"]))
+        
+        st.write(f"💰 배당 데이터: {len(d_data)}건")
+        if d_data:
+            st.dataframe(pd.DataFrame(d_data, columns=["Date", "ID", "Ticker", "Amount", "Rate", "Note"]))
+            
+        st.session_state['final_t'] = t_data
+        st.session_state['final_d'] = d_data
+
+st.subheader("2. DB 저장")
+if st.button("💾 구글 시트에 덮어쓰기"):
+    if 'final_t' in st.session_state:
+        if save_to_sheet(st.session_state['final_t'], st.session_state['final_d']):
+            st.success("🎉 DB 구축 완료! 이제 Dashboard.py를 STEP 3(최종본)로 교체하세요.")
+            st.balloons()
+    else:
+        st.warning("먼저 데이터를 불러와주세요.")
