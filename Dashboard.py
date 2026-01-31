@@ -8,8 +8,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import KIS_API_Manager as kis
 
 st.set_page_config(page_title="DB Recovery Final", page_icon="🚑", layout="wide")
-st.title("🚑 DB 복구 (오류 수정 및 파싱 완료)")
-st.caption("성공한 신규 ID(CTOS4001R)를 사용하여 데이터를 수집하고 파싱합니다.")
+st.title("🚑 DB 복구 (파라미터 수정 완료)")
+st.caption("CTOS4001R API 규격에 맞춰 파라미터명(ERLM_STRT_DT)을 수정했습니다.")
 
 # -----------------------------------------------------------
 # 0. 토큰 및 설정
@@ -31,24 +31,24 @@ headers = {
 }
 
 # -----------------------------------------------------------
-# 1. 데이터 수집 함수 (버그 수정판)
+# 1. 데이터 수집 함수 (파라미터명 수정됨)
 # -----------------------------------------------------------
 def fetch_final_data():
     trade_rows = []
     div_rows = []
     
-    # [1] 거래 내역 (CTOS4001R) - 드디어 성공한 그 녀석
-    st.info("📡 1. 일별 거래내역(CTOS4001R) 조회 및 파싱 중...")
+    # [1] 거래 내역 (CTOS4001R)
+    st.info("📡 1. 일별 거래내역(CTOS4001R) 조회 중... (파라미터 수정됨)")
     
     path_hist = "/uapi/overseas-stock/v1/trading/inquire-period-trans"
     headers['tr_id'] = "CTOS4001R" 
     
-    # 조회 기간: 넉넉하게 2024년 1월 1일부터
+    # [핵심 수정] 파라미터 이름을 문서에 맞게 변경
     params_hist = {
         "CANO": cano,
         "ACNT_PRDT_CD": acnt_prdt_cd,
-        "STRT_DT": "20240101",
-        "END_DT": datetime.now().strftime("%Y%m%d"),
+        "ERLM_STRT_DT": "20240101", # STRT_DT -> ERLM_STRT_DT
+        "ERLM_END_DT": datetime.now().strftime("%Y%m%d"), # END_DT -> ERLM_END_DT
         "SLL_BUY_DVSN_CD": "00", # 전체
         "CCLD_DVSN": "00",       # 전체
         "CTX_AREA_FK100": "",
@@ -64,25 +64,21 @@ def fetch_final_data():
             
             for item in data['output1']:
                 # 날짜 포맷 (YYYYMMDD -> YYYY-MM-DD)
-                dt_str = item['trad_dt'] # 필드명 주의 (tr_dt가 아니라 trad_dt 일 수 있음)
-                if not dt_str: dt_str = item.get('tr_dt', datetime.now().strftime("%Y%m%d"))
+                dt_str = item.get('tr_dt', '') # 문서상 tr_dt일 가능성 높음 (trad_dt 확인 필요)
+                if not dt_str: dt_str = item.get('trad_dt', datetime.now().strftime("%Y%m%d"))
                 dt_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
                 
                 # 공통 정보
                 ticker = item.get('pdno', '') # 종목코드
                 name = item.get('ovrs_item_name', '') # 종목명
+                tr_name = item.get('tr_nm', '') # 거래명 (매수/매도/배당)
                 
-                # 구분 (매수/매도/배당)
-                # sll_buy_dvsn_cd: 01(매도), 02(매수)
-                dvsn = item.get('sll_buy_dvsn_cd', '')
-                tr_name = item.get('tr_nm', '') # 거래명 (배당 확인용)
-                
-                # --- A. 매매 내역 파싱 ---
-                if dvsn in ['01', '02']: 
-                    t_type = "Buy" if dvsn == '02' else "Sell"
+                # --- A. 매매 내역 파싱 (매수/매도) ---
+                # tr_name에 '매수', '매도'가 포함되어 있는지 확인
+                if "매수" in tr_name or "매도" in tr_name:
+                    t_type = "Buy" if "매수" in tr_name else "Sell"
                     
-                    # [수정] float 변환 후 int (3.0000 -> 3)
-                    qty_raw = item.get('ccld_qty', '0')
+                    qty_raw = item.get('ccld_qty', '0') # 체결수량
                     qty = int(float(qty_raw))
                     
                     price_raw = item.get('ft_ccld_unpr3', '0') # 체결단가
@@ -103,16 +99,14 @@ def fetch_final_data():
                         ])
 
                 # --- B. 배당 내역 파싱 ---
-                # (CTOS4001R에 배당이 같이 나오는지 확인 필요, 보통은 같이 나옴)
-                # 만약 안 나오면 아래 잔고 조회 로직은 유지
-                if "배당" in tr_name: # 거래명에 '배당'이 있으면
+                if "배당" in tr_name:
                     amt_raw = item.get('frcr_amt', '0') # 외화금액
                     if float(amt_raw) == 0: amt_raw = item.get('tr_frcr_amt', '0')
                     amount = float(amt_raw)
                     
                     if amount > 0:
                         ex_rate = 1450.0
-                        # [하드코딩] 리얼티인컴
+                        # [하드코딩] 리얼티인컴 1월 16일
                         if ticker == 'O' and '2026-01-1' in dt_fmt: ex_rate = 1469.7
                         
                         div_rows.append([
@@ -126,13 +120,15 @@ def fetch_final_data():
                         
         else:
             st.warning(f"거래내역 응답 코드 확인 필요: {data.get('msg1')}")
+            # [디버깅] 만약 또 실패하면 파라미터 확인을 위해 에러 내용 상세 출력
+            if data.get('msg1'): st.write(data)
 
     except Exception as e:
         st.error(f"거래내역 파싱 오류: {e}")
 
-    # [2] 잔고 조회 (CTRP6504R) - 만약 내역이 비었을 때를 대비한 보험
+    # [2] 잔고 조회 (CTRP6504R) - 백업용
     if not trade_rows:
-        st.warning("⚠️ 거래내역이 없거나 파싱되지 않아 '잔고'로 대체합니다.")
+        st.warning("⚠️ 거래내역이 비어있어 '잔고'로 대체합니다.")
         st.info("📡 2. 체결기준 잔고(CTRP6504R) 조회 중...")
         
         path_bal = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
@@ -151,12 +147,10 @@ def fetch_final_data():
             if data['rt_cd'] == '0':
                 today = datetime.now().strftime("%Y-%m-%d")
                 for item in data['output1']:
-                    # [수정] 여기서 에러 났던 부분! (int 형변환 수정)
                     qty_raw = item.get('ccld_qty_smtl1', '0')
-                    qty = int(float(qty_raw)) # 3.0000 -> 3.0 -> 3
+                    qty = int(float(qty_raw))
                     
                     if qty > 0:
-                        # 매입금액 / 수량 = 평단가
                         buy_amt = float(item.get('frcr_pchs_amt1', '0'))
                         avg_price = buy_amt / qty if qty > 0 else 0
                         
@@ -171,14 +165,13 @@ def fetch_final_data():
                             0,
                             "Snapshot_Auto"
                         ])
-                        
         except Exception as e:
             st.error(f"잔고 조회 오류: {e}")
 
     return trade_rows, div_rows
 
 # -----------------------------------------------------------
-# 2. 저장 함수
+# 2. 저장 함수 (동일)
 # -----------------------------------------------------------
 def save_to_sheet(t_data, d_data):
     try:
