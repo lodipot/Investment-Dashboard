@@ -1,84 +1,106 @@
 import streamlit as st
 import requests
 import KIS_API_Manager as kis
+import time
 
-st.set_page_config(page_title="KIS API 정밀진단", page_icon="🚑", layout="wide")
-st.title("🚑 KIS API 접속 정밀 진단")
+st.set_page_config(page_title="KIS API 탐색기", page_icon="🧭", layout="wide")
+st.title("🧭 해외주식 API 주소 정밀 탐색")
 
-# 1. 설정값 검증
-st.subheader("1. 설정값 검증 (secrets.toml)")
-
-try:
-    base_url = st.secrets["kis_api"]["URL_BASE"].strip() # 공백 제거
-    app_key = st.secrets["kis_api"]["APP_KEY"].strip()
-    app_secret = st.secrets["kis_api"]["APP_SECRET"].strip()
-    cano = str(st.secrets["kis_api"]["CANO"]).strip() # 문자열 강제 변환
-    acnt_prdt_cd = str(st.secrets["kis_api"]["ACNT_PRDT_CD"]).strip()
-    
-    # URL 끝 슬래시 제거
-    if base_url.endswith("/"): base_url = base_url[:-1]
-    
-    st.write(f"🔹 **URL_BASE:** `{base_url}`")
-    st.write(f"🔹 **계좌번호:** `{cano}-{acnt_prdt_cd}`")
-    st.success("✅ 설정값 포맷은 정상입니다.")
-    
-except Exception as e:
-    st.error(f"❌ 설정 불러오기 실패: {e}")
-    st.stop()
-
-# 2. 토큰 상태 확인
-st.subheader("2. 접근 토큰 상태")
+# 1. 토큰 확보
+st.subheader("1. 접속 권한 확인")
 token = kis.get_access_token()
-if token:
-    st.success(f"✅ 토큰 확보 완료 (앞 10자리: {token[:10]}...)")
-else:
-    st.error("❌ 토큰 발급 실패. 앱 키/시크릿을 확인하세요.")
+if not token:
+    st.error("❌ 토큰 발급 실패")
     st.stop()
+else:
+    st.success("✅ 토큰 확보 완료")
 
-# 3. API 강제 호출 (가장 기본적인 URL)
-st.subheader("3. 서버 응답 테스트")
+# 2. 주소 탐색 시작
+st.subheader("2. 유효한 거래내역 주소 찾기")
 
-# 테스트할 정확한 경로 (해외주식 기간별 체결내역)
-path = "/uapi/overseas-stock/v1/trading/inquire-period-ccld"
-full_url = f"{base_url}{path}"
+base_url = st.secrets["kis_api"]["URL_BASE"].strip()
+if base_url.endswith("/"): base_url = base_url[:-1]
 
-st.write(f"📡 **요청 주소:** `{full_url}`")
+app_key = st.secrets["kis_api"]["APP_KEY"]
+app_secret = st.secrets["kis_api"]["APP_SECRET"]
+cano = st.secrets["kis_api"]["CANO"]
+acnt_prdt_cd = st.secrets["kis_api"]["ACNT_PRDT_CD"]
 
 headers = {
     "content-type": "application/json",
     "authorization": f"Bearer {token}",
     "appkey": app_key,
     "appsecret": app_secret,
-    "tr_id": "TTTS3035R" # 실전투자용 TR ID
+    "tr_id": "TTTS3035R" # 기본 ID
 }
 
-params = {
-    "CANO": cano,
-    "ACNT_PRDT_CD": acnt_prdt_cd,
-    "STRT_DT": "20250101",
-    "END_DT": "20250131",
-    "SLL_BUY_DVSN_CD": "00",
-    "CCLD_DVSN": "00",
-    "CTX_AREA_FK100": "",
-    "CTX_AREA_NK100": ""
-}
+# 테스트할 주소 후보군 (가능성 높은 순)
+candidates = [
+    # [A] 기간별 체결내역 (가장 유력)
+    ("/uapi/overseas-stock/v1/trading/inquire-period-ccld", "TTTS3035R", "기간별 체결내역"),
+    
+    # [B] 일별 체결내역 (대안)
+    ("/uapi/overseas-stock/v1/trading/inquire-ccld", "TTTS3035R", "일별 체결내역(CCLD)"),
+    
+    # [C] 거래내역 (입출금/배당 등) - TR_ID 다름
+    ("/uapi/overseas-stock/v1/trading/inquire-period-trans", "TTTS3031R", "기간별 거래내역(TRANS)"),
+    
+    # [D] 잔고 조회 (이건 되나?)
+    ("/uapi/overseas-stock/v1/trading/inquire-present-balance", "TTTS3012R", "실시간 잔고"),
+    
+    # [E] 현재가 (대조군 - 이건 돼야 정상)
+    ("/uapi/overseas-price/v1/quotations/price", "HHDFS00000300", "현재가(Price)"),
+]
 
-if st.button("🚨 진단 요청 보내기"):
-    try:
-        res = requests.get(full_url, headers=headers, params=params)
+if st.button("🚀 주소 전수 조사 시작"):
+    success_count = 0
+    
+    for path, tr_id, desc in candidates:
+        full_url = f"{base_url}{path}"
         
-        st.write(f"**상태 코드:** `{res.status_code}`")
+        # TR_ID 교체
+        headers['tr_id'] = tr_id
         
-        if res.status_code == 200:
-            st.success("🎉 성공! 데이터가 들어왔습니다.")
-            st.json(res.json())
-        else:
-            st.error("❌ 요청 실패")
-            st.write("▼ **서버가 보낸 응답 본문 (Raw Text):**")
-            st.code(res.text) # 여기에 진짜 에러 원인이 적혀 있음
+        # 파라미터 (공통적으로 쓰이는 것들)
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "STRT_DT": "20250129", # 최근 평일
+            "END_DT": "20250130",
+            "SLL_BUY_DVSN_CD": "00",
+            "CCLD_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+            # 현재가용 파라미터
+            "AUTH": "", "EXCD": "NAS", "SYMB": "AAPL",
+            # 잔고용 파라미터
+            "WCRC_FRCR_DVSN_CD": "02", "OVRS_EXCG_CD": "NAS"
+        }
+        
+        try:
+            res = requests.get(full_url, headers=headers, params=params)
             
-            st.write("▼ **응답 헤더 (Headers):**")
-            st.json(dict(res.headers))
+            st.write(f"📡 **[{desc}]** 시도 중...")
+            st.caption(f"주소: `{path}`")
             
-    except Exception as e:
-        st.error(f"통신 에러 발생: {e}")
+            if res.status_code == 200:
+                st.success(f"🎉 **성공! (200 OK)**")
+                st.json(res.json()) # 데이터 확인
+                success_count += 1
+            elif res.status_code == 404:
+                st.error("❌ 실패 (404 Not Found) - 주소 없음")
+            else:
+                st.warning(f"⚠️ 접근 가능하나 에러 ({res.status_code})")
+                st.write(f"메시지: {res.text}")
+                
+        except Exception as e:
+            st.error(f"통신 오류: {e}")
+            
+        st.divider()
+        time.sleep(0.5)
+        
+    if success_count == 0:
+        st.error("🚫 모든 주소가 실패했습니다. 계좌가 '해외주식 거래' 미등록 상태이거나 API 설정 문제입니다.")
+    else:
+        st.balloons()
+        st.success("✅ 유효한 주소를 찾았습니다! 위에서 '성공'한 주소를 기억해주세요.")
