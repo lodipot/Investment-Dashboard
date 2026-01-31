@@ -1,15 +1,14 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import KIS_API_Manager as kis
 
 st.set_page_config(page_title="DB Recovery Real-Final", page_icon="🚑", layout="wide")
-st.title("🚑 DB 복구 (필드명 정밀 수정)")
-st.caption("발견된 36건의 데이터를 정확한 필드명으로 파싱하여 복구합니다.")
+st.title("🚑 DB 복구 (파라미터 완벽 수정)")
+st.caption("누락되었던 거래소코드(OVRS_EXCG_CD) 파라미터를 추가하여 36건의 내역을 온전히 가져옵니다.")
 
 # -----------------------------------------------------------
 # 0. 토큰 및 설정
@@ -31,23 +30,27 @@ headers = {
 }
 
 # -----------------------------------------------------------
-# 1. 데이터 수집 함수 (필드명 교체 적용)
+# 1. 데이터 수집 함수 (파라미터 완벽 보정)
 # -----------------------------------------------------------
 def fetch_final_data():
     trade_rows = []
     
-    st.info("📡 1. 일별 거래내역(CTOS4001R) 조회 및 파싱 중...")
+    st.info("📡 1. 일별 거래내역(CTOS4001R) 조회 중...")
     
     path_hist = "/uapi/overseas-stock/v1/trading/inquire-period-trans"
     headers['tr_id'] = "CTOS4001R" 
     
+    # [핵심 수정] 엑셀 문서에 명시된 필수 파라미터 모두 포함
     params_hist = {
         "CANO": cano,
         "ACNT_PRDT_CD": acnt_prdt_cd,
         "ERLM_STRT_DT": "20240101", # 시작일
         "ERLM_END_DT": datetime.now().strftime("%Y%m%d"), # 종료일
-        "SLL_BUY_DVSN_CD": "00", # 전체
-        "CCLD_DVSN": "00",       # 전체
+        "SLL_BUY_DVSN_CD": "00", # 00:전체
+        "CCLD_DVSN": "00",       # 00:전체
+        "OVRS_EXCG_CD": "",      # [추가] 해외거래소코드 (공백 허용, 키 필수)
+        "PDNO": "",              # [추가] 종목코드 (공백 허용)
+        "LOAN_DVSN_CD": "",      # [추가] 대출구분 (공백 허용)
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": ""
     }
@@ -56,67 +59,78 @@ def fetch_final_data():
         res = requests.get(f"{base_url}{path_hist}", headers=headers, params=params_hist)
         data = res.json()
         
+        # [성공 체크] rt_cd가 0이어야 진짜 성공
         if res.status_code == 200 and data['rt_cd'] == '0':
             items = data['output1']
             st.success(f"✅ 거래내역 조회 성공! (총 {len(items)}건 발견)")
             
-            # [디버깅] 첫 번째 데이터 구조 확인용 (필요시 주석 해제)
-            # if items: st.write("첫 번째 데이터 샘플:", items[0])
-
             for item in items:
-                # 1. 날짜 (trad_dt 우선 사용)
+                # 1. 날짜 파싱 (trad_dt 우선)
                 dt_str = item.get('trad_dt')
-                if not dt_str: dt_str = item.get('tr_dt') # 혹시 몰라 예비용
-                if not dt_str: dt_str = datetime.now().strftime("%Y%m%d") # 최악의 경우 오늘
+                if not dt_str: dt_str = item.get('tr_dt')
+                if not dt_str: dt_str = datetime.now().strftime("%Y%m%d")
                 
                 dt_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
                 
-                # 2. 거래 구분 (매수/매도)
-                # sll_buy_dvsn_cd: 01(매도), 02(매수)
-                dvsn_cd = item.get('sll_buy_dvsn_cd', '')
-                dvsn_name = item.get('sll_buy_dvsn_name', '') # 매수/매도 텍스트
-                
-                # 3. 상세 정보
+                # 2. 기본 정보
                 ticker = item.get('pdno', '')
                 name = item.get('ovrs_item_name', '')
+                tr_name = item.get('tr_nm', '')  # 거래명 (배당 등)
+                dvsn_name = item.get('sll_buy_dvsn_name', '') # 매수/매도
                 
-                # 수량 (ccld_qty)
-                qty = int(float(item.get('ccld_qty', '0')))
-                
-                # 단가 (ft_ccld_unpr2 또는 ovrs_stck_ccld_unpr)
-                price = float(item.get('ft_ccld_unpr2', '0'))
-                if price == 0: price = float(item.get('ovrs_stck_ccld_unpr', '0'))
-                
-                # 환율 (일단 0으로, 추후 보정 가능)
-                rate = 0.0 
-
-                # DB 행 생성 (매수/매도인 경우만 Trade_Log에 추가)
-                if dvsn_cd in ['01', '02'] or '매수' in dvsn_name or '매도' in dvsn_name:
-                    type_str = "Buy" if (dvsn_cd == '02' or '매수' in dvsn_name) else "Sell"
+                # 3. 매매 내역 (매수/매도)
+                if '매수' in dvsn_name or '매도' in dvsn_name:
+                    t_type = "Buy" if '매수' in dvsn_name else "Sell"
                     
-                    trade_rows.append([
-                        dt_fmt,
-                        f"{dt_str}_{ticker}_{qty}", # 고유 ID (날짜_티커_수량)
-                        ticker,
-                        name,
-                        type_str,
-                        qty,
-                        price,
-                        rate,
-                        f"API_{dvsn_name}" # 비고란에 원문 기록
-                    ])
+                    # 수량/단가 (소수점 처리 포함)
+                    qty = int(float(item.get('ccld_qty', '0')))
                     
+                    price = float(item.get('ft_ccld_unpr2', '0'))
+                    if price == 0: price = float(item.get('ovrs_stck_ccld_unpr', '0'))
+                    
+                    if qty > 0:
+                        trade_rows.append([
+                            dt_fmt,
+                            f"{dt_str}_{ticker}_{qty}", # ID
+                            ticker,
+                            name,
+                            t_type,
+                            qty,
+                            price,
+                            0.0, # 환율
+                            f"API_{dvsn_name}"
+                        ])
+                
+                # 4. 배당 내역 (거래명에 '배당' 포함 시)
+                elif "배당" in tr_name or "배당" in dvsn_name:
+                    # 배당금은 보통 frcr_amt(외화금액)에 찍힘
+                    amount = float(item.get('frcr_amt', '0'))
+                    if amount == 0: amount = float(item.get('tr_frcr_amt', '0'))
+                    
+                    if amount > 0:
+                        # [하드코딩] 리얼티인컴 1월 16일 건
+                        ex_rate = 1450.0
+                        if ticker == 'O' and '2026-01-1' in dt_fmt: 
+                            ex_rate = 1469.7
+                            
+                        # Dividend_Log는 별도 저장이 필요하므로 여기선 print만 하거나
+                        # trade_rows와 구조가 달라 별도 리스트로 관리해야 함.
+                        # (단순화를 위해 이번 턴은 Trade_Log 복구에 집중)
+                        # 필요 시 별도 div_rows 리스트 사용 가능.
+                        pass
+                        
         else:
-            st.error(f"API 응답 오류: {data.get('msg1')}")
-            st.write(data) # 에러 시 내용 출력
+            st.error(f"API 응답 오류 (rt_cd: {data.get('rt_cd')}): {data.get('msg1')}")
+            st.write("▼ 서버 응답 내용:")
+            st.json(data)
 
     except Exception as e:
-        st.error(f"파싱 중 오류 발생: {e}")
+        st.error(f"데이터 처리 중 오류: {e}")
 
-    # [비상대책] 거래내역이 비어있으면 잔고라도 가져옴 (CTRP6504R)
+    # [비상대책] 거래내역이 여전히 0건이면 잔고라도 가져옴
     if not trade_rows:
-        st.warning("⚠️ 거래내역 파싱 실패. '현재 잔고'를 가져옵니다.")
-        headers['tr_id'] = "CTRP6504R"
+        st.warning("⚠️ 거래내역이 비어있어 '현재 잔고'를 가져옵니다.")
+        headers['tr_id'] = "CTRP6504R" # 잔고 조회 ID
         params_bal = {
             "CANO": cano, "ACNT_PRDT_CD": acnt_prdt_cd,
             "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
@@ -140,7 +154,7 @@ def fetch_final_data():
     return trade_rows
 
 # -----------------------------------------------------------
-# 2. 저장 함수 (구글 시트)
+# 2. 저장 함수
 # -----------------------------------------------------------
 def save_to_sheet(t_data):
     try:
@@ -154,9 +168,7 @@ def save_to_sheet(t_data):
         ws_trade.clear()
         ws_trade.append_row(["Date", "Order_ID", "Ticker", "Name", "Type", "Qty", "Price_USD", "Exchange_Rate", "Note"])
         
-        if t_data: 
-            ws_trade.append_rows(t_data)
-        
+        if t_data: ws_trade.append_rows(t_data)
         return True
     except Exception as e:
         st.error(f"저장 실패: {e}")
@@ -165,24 +177,21 @@ def save_to_sheet(t_data):
 # -----------------------------------------------------------
 # 3. UI 실행
 # -----------------------------------------------------------
-if st.button("🚀 데이터 불러오기 (최종 검증)"):
+if st.button("🚀 데이터 불러오기 (최종)"):
     t_data = fetch_final_data()
     
     if t_data:
-        # 데이터프레임으로 변환하여 예쁘게 보여줌
-        df = pd.DataFrame(t_data, columns=["Date", "ID", "Ticker", "Name", "Type", "Qty", "Price", "Rate", "Note"])
         st.success(f"🎉 데이터 {len(t_data)}건 확보 완료!")
-        st.dataframe(df) # 여기서 눈으로 확인하세요!
-        
-        # 세션에 저장 (저장 버튼 활성화용)
+        df = pd.DataFrame(t_data, columns=["Date", "ID", "Ticker", "Name", "Type", "Qty", "Price", "Rate", "Note"])
+        st.dataframe(df)
         st.session_state['rec_t'] = t_data
     else:
         st.error("데이터를 가져오지 못했습니다.")
 
-if st.button("💾 구글 시트에 저장 (실행)"):
+if st.button("💾 구글 시트에 저장"):
     if 'rec_t' in st.session_state:
         if save_to_sheet(st.session_state['rec_t']):
             st.balloons()
-            st.success("🏆 DB 복구 완료! 이제 대시보드를 완성(STEP 3)하세요.")
+            st.success("🏆 DB 복구 완료! 이제 Dashboard.py를 STEP 3로 교체하세요.")
     else:
-        st.warning("먼저 '데이터 불러오기'를 눌러 확인해주세요.")
+        st.warning("먼저 '데이터 불러오기'를 눌러주세요.")
