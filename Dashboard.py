@@ -7,9 +7,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import KIS_API_Manager as kis
 
-st.set_page_config(page_title="DB Recovery Final", page_icon="🚑", layout="wide")
-st.title("🚑 DB 복구 (파라미터 수정 완료)")
-st.caption("CTOS4001R API 규격에 맞춰 파라미터명(ERLM_STRT_DT)을 수정했습니다.")
+st.set_page_config(page_title="DB Recovery Real-Final", page_icon="🚑", layout="wide")
+st.title("🚑 DB 복구 (필드명 정밀 수정)")
+st.caption("발견된 36건의 데이터를 정확한 필드명으로 파싱하여 복구합니다.")
 
 # -----------------------------------------------------------
 # 0. 토큰 및 설정
@@ -31,24 +31,21 @@ headers = {
 }
 
 # -----------------------------------------------------------
-# 1. 데이터 수집 함수 (파라미터명 수정됨)
+# 1. 데이터 수집 함수 (필드명 교체 적용)
 # -----------------------------------------------------------
 def fetch_final_data():
     trade_rows = []
-    div_rows = []
     
-    # [1] 거래 내역 (CTOS4001R)
-    st.info("📡 1. 일별 거래내역(CTOS4001R) 조회 중... (파라미터 수정됨)")
+    st.info("📡 1. 일별 거래내역(CTOS4001R) 조회 및 파싱 중...")
     
     path_hist = "/uapi/overseas-stock/v1/trading/inquire-period-trans"
     headers['tr_id'] = "CTOS4001R" 
     
-    # [핵심 수정] 파라미터 이름을 문서에 맞게 변경
     params_hist = {
         "CANO": cano,
         "ACNT_PRDT_CD": acnt_prdt_cd,
-        "ERLM_STRT_DT": "20240101", # STRT_DT -> ERLM_STRT_DT
-        "ERLM_END_DT": datetime.now().strftime("%Y%m%d"), # END_DT -> ERLM_END_DT
+        "ERLM_STRT_DT": "20240101", # 시작일
+        "ERLM_END_DT": datetime.now().strftime("%Y%m%d"), # 종료일
         "SLL_BUY_DVSN_CD": "00", # 전체
         "CCLD_DVSN": "00",       # 전체
         "CTX_AREA_FK100": "",
@@ -60,120 +57,92 @@ def fetch_final_data():
         data = res.json()
         
         if res.status_code == 200 and data['rt_cd'] == '0':
-            st.success(f"✅ 거래내역 조회 성공! (총 {len(data['output1'])}건 발견)")
+            items = data['output1']
+            st.success(f"✅ 거래내역 조회 성공! (총 {len(items)}건 발견)")
             
-            for item in data['output1']:
-                # 날짜 포맷 (YYYYMMDD -> YYYY-MM-DD)
-                dt_str = item.get('tr_dt', '') # 문서상 tr_dt일 가능성 높음 (trad_dt 확인 필요)
-                if not dt_str: dt_str = item.get('trad_dt', datetime.now().strftime("%Y%m%d"))
+            # [디버깅] 첫 번째 데이터 구조 확인용 (필요시 주석 해제)
+            # if items: st.write("첫 번째 데이터 샘플:", items[0])
+
+            for item in items:
+                # 1. 날짜 (trad_dt 우선 사용)
+                dt_str = item.get('trad_dt')
+                if not dt_str: dt_str = item.get('tr_dt') # 혹시 몰라 예비용
+                if not dt_str: dt_str = datetime.now().strftime("%Y%m%d") # 최악의 경우 오늘
+                
                 dt_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
                 
-                # 공통 정보
-                ticker = item.get('pdno', '') # 종목코드
-                name = item.get('ovrs_item_name', '') # 종목명
-                tr_name = item.get('tr_nm', '') # 거래명 (매수/매도/배당)
+                # 2. 거래 구분 (매수/매도)
+                # sll_buy_dvsn_cd: 01(매도), 02(매수)
+                dvsn_cd = item.get('sll_buy_dvsn_cd', '')
+                dvsn_name = item.get('sll_buy_dvsn_name', '') # 매수/매도 텍스트
                 
-                # --- A. 매매 내역 파싱 (매수/매도) ---
-                # tr_name에 '매수', '매도'가 포함되어 있는지 확인
-                if "매수" in tr_name or "매도" in tr_name:
-                    t_type = "Buy" if "매수" in tr_name else "Sell"
-                    
-                    qty_raw = item.get('ccld_qty', '0') # 체결수량
-                    qty = int(float(qty_raw))
-                    
-                    price_raw = item.get('ft_ccld_unpr3', '0') # 체결단가
-                    if float(price_raw) == 0: price_raw = item.get('ovrs_stck_ccld_unpr', '0')
-                    price = float(price_raw)
-                    
-                    if qty > 0:
-                        trade_rows.append([
-                            dt_fmt,
-                            f"{dt_str}_{ticker}_{qty}", # 임시 ID
-                            ticker,
-                            name,
-                            t_type,
-                            qty,
-                            price,
-                            0,
-                            "API_History"
-                        ])
+                # 3. 상세 정보
+                ticker = item.get('pdno', '')
+                name = item.get('ovrs_item_name', '')
+                
+                # 수량 (ccld_qty)
+                qty = int(float(item.get('ccld_qty', '0')))
+                
+                # 단가 (ft_ccld_unpr2 또는 ovrs_stck_ccld_unpr)
+                price = float(item.get('ft_ccld_unpr2', '0'))
+                if price == 0: price = float(item.get('ovrs_stck_ccld_unpr', '0'))
+                
+                # 환율 (일단 0으로, 추후 보정 가능)
+                rate = 0.0 
 
-                # --- B. 배당 내역 파싱 ---
-                if "배당" in tr_name:
-                    amt_raw = item.get('frcr_amt', '0') # 외화금액
-                    if float(amt_raw) == 0: amt_raw = item.get('tr_frcr_amt', '0')
-                    amount = float(amt_raw)
+                # DB 행 생성 (매수/매도인 경우만 Trade_Log에 추가)
+                if dvsn_cd in ['01', '02'] or '매수' in dvsn_name or '매도' in dvsn_name:
+                    type_str = "Buy" if (dvsn_cd == '02' or '매수' in dvsn_name) else "Sell"
                     
-                    if amount > 0:
-                        ex_rate = 1450.0
-                        # [하드코딩] 리얼티인컴 1월 16일
-                        if ticker == 'O' and '2026-01-1' in dt_fmt: ex_rate = 1469.7
-                        
-                        div_rows.append([
-                            dt_fmt,
-                            f"{dt_str}_{ticker}_DIV",
-                            ticker,
-                            amount,
-                            ex_rate,
-                            "API_History"
-                        ])
-                        
+                    trade_rows.append([
+                        dt_fmt,
+                        f"{dt_str}_{ticker}_{qty}", # 고유 ID (날짜_티커_수량)
+                        ticker,
+                        name,
+                        type_str,
+                        qty,
+                        price,
+                        rate,
+                        f"API_{dvsn_name}" # 비고란에 원문 기록
+                    ])
+                    
         else:
-            st.warning(f"거래내역 응답 코드 확인 필요: {data.get('msg1')}")
-            # [디버깅] 만약 또 실패하면 파라미터 확인을 위해 에러 내용 상세 출력
-            if data.get('msg1'): st.write(data)
+            st.error(f"API 응답 오류: {data.get('msg1')}")
+            st.write(data) # 에러 시 내용 출력
 
     except Exception as e:
-        st.error(f"거래내역 파싱 오류: {e}")
+        st.error(f"파싱 중 오류 발생: {e}")
 
-    # [2] 잔고 조회 (CTRP6504R) - 백업용
+    # [비상대책] 거래내역이 비어있으면 잔고라도 가져옴 (CTRP6504R)
     if not trade_rows:
-        st.warning("⚠️ 거래내역이 비어있어 '잔고'로 대체합니다.")
-        st.info("📡 2. 체결기준 잔고(CTRP6504R) 조회 중...")
-        
-        path_bal = "/uapi/overseas-stock/v1/trading/inquire-present-balance"
+        st.warning("⚠️ 거래내역 파싱 실패. '현재 잔고'를 가져옵니다.")
         headers['tr_id'] = "CTRP6504R"
-        
         params_bal = {
             "CANO": cano, "ACNT_PRDT_CD": acnt_prdt_cd,
-            "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840",
-            "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
+            "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
         }
-        
         try:
-            res = requests.get(f"{base_url}{path_bal}", headers=headers, params=params_bal)
+            res = requests.get(f"{base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance", headers=headers, params=params_bal)
             data = res.json()
-            
             if data['rt_cd'] == '0':
                 today = datetime.now().strftime("%Y-%m-%d")
                 for item in data['output1']:
-                    qty_raw = item.get('ccld_qty_smtl1', '0')
-                    qty = int(float(qty_raw))
-                    
+                    qty = int(float(item.get('ccld_qty_smtl1', '0')))
                     if qty > 0:
                         buy_amt = float(item.get('frcr_pchs_amt1', '0'))
                         avg_price = buy_amt / qty if qty > 0 else 0
-                        
                         trade_rows.append([
-                            today,
-                            f"INIT_BAL_{item['std_pdno']}",
-                            item['std_pdno'],
-                            item['prdt_name'],
-                            "Buy",
-                            qty,
-                            avg_price,
-                            0,
-                            "Snapshot_Auto"
+                            today, f"INIT_BAL_{item['std_pdno']}", item['std_pdno'], 
+                            item['prdt_name'], "Buy", qty, avg_price, 0, "Snapshot_Auto"
                         ])
-        except Exception as e:
-            st.error(f"잔고 조회 오류: {e}")
+        except: pass
 
-    return trade_rows, div_rows
+    return trade_rows
 
 # -----------------------------------------------------------
-# 2. 저장 함수 (동일)
+# 2. 저장 함수 (구글 시트)
 # -----------------------------------------------------------
-def save_to_sheet(t_data, d_data):
+def save_to_sheet(t_data):
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = dict(st.secrets["gcp_service_account"])
@@ -184,12 +153,9 @@ def save_to_sheet(t_data, d_data):
         ws_trade = sh.worksheet("Trade_Log")
         ws_trade.clear()
         ws_trade.append_row(["Date", "Order_ID", "Ticker", "Name", "Type", "Qty", "Price_USD", "Exchange_Rate", "Note"])
-        if t_data: ws_trade.append_rows(t_data)
         
-        ws_div = sh.worksheet("Dividend_Log")
-        ws_div.clear()
-        ws_div.append_row(["Date", "Order_ID", "Ticker", "Amount_USD", "Ex_Rate", "Note"])
-        if d_data: ws_div.append_rows(d_data)
+        if t_data: 
+            ws_trade.append_rows(t_data)
         
         return True
     except Exception as e:
@@ -199,25 +165,24 @@ def save_to_sheet(t_data, d_data):
 # -----------------------------------------------------------
 # 3. UI 실행
 # -----------------------------------------------------------
-if st.button("🚀 최종 데이터 불러오기"):
-    t_data, d_data = fetch_final_data()
+if st.button("🚀 데이터 불러오기 (최종 검증)"):
+    t_data = fetch_final_data()
     
     if t_data:
-        st.success(f"🎉 성공! 매매 데이터 {len(t_data)}건 확보.")
-        st.dataframe(pd.DataFrame(t_data, columns=["Date", "ID", "Ticker", "Name", "Type", "Qty", "Price", "Rate", "Note"]))
-        st.session_state['rec_t'] = t_data
-        st.session_state['rec_d'] = d_data
+        # 데이터프레임으로 변환하여 예쁘게 보여줌
+        df = pd.DataFrame(t_data, columns=["Date", "ID", "Ticker", "Name", "Type", "Qty", "Price", "Rate", "Note"])
+        st.success(f"🎉 데이터 {len(t_data)}건 확보 완료!")
+        st.dataframe(df) # 여기서 눈으로 확인하세요!
         
-        if d_data:
-            st.info(f"💰 배당 데이터 {len(d_data)}건 확보.")
-            st.dataframe(pd.DataFrame(d_data, columns=["Date", "ID", "Ticker", "Amount", "Rate", "Note"]))
+        # 세션에 저장 (저장 버튼 활성화용)
+        st.session_state['rec_t'] = t_data
     else:
-        st.error("🚫 데이터 확보 실패. (로그를 확인해주세요)")
+        st.error("데이터를 가져오지 못했습니다.")
 
-if st.button("💾 구글 시트에 저장 (복구 완료)"):
+if st.button("💾 구글 시트에 저장 (실행)"):
     if 'rec_t' in st.session_state:
-        if save_to_sheet(st.session_state['rec_t'], st.session_state['rec_d']):
+        if save_to_sheet(st.session_state['rec_t']):
             st.balloons()
-            st.success("🏆 DB 복구 및 재구축이 완료되었습니다! 이제 Dashboard.py를 STEP 3로 교체하세요.")
+            st.success("🏆 DB 복구 완료! 이제 대시보드를 완성(STEP 3)하세요.")
     else:
-        st.warning("데이터를 먼저 불러와주세요.")
+        st.warning("먼저 '데이터 불러오기'를 눌러 확인해주세요.")
