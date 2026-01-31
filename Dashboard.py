@@ -18,6 +18,7 @@ st.warning("⚠️ 이 도구는 구글 시트의 [Trade_Log]와 [Dividend_Log]�
 # -----------------------------------------------------------
 # 1. API 데이터 수집 함수
 # -----------------------------------------------------------
+# [수정된 함수] 에러 내용을 보여주는 디버깅 버전
 def fetch_api_data():
     token = kis.get_access_token()
     if not token:
@@ -25,6 +26,9 @@ def fetch_api_data():
         return None, None
 
     base_url = st.secrets["kis_api"]["URL_BASE"]
+    # [중요] URL 뒤에 슬래시가 있다면 제거
+    if base_url.endswith("/"): base_url = base_url[:-1]
+
     app_key = st.secrets["kis_api"]["APP_KEY"]
     app_secret = st.secrets["kis_api"]["APP_SECRET"]
     cano = st.secrets["kis_api"]["CANO"]
@@ -38,47 +42,58 @@ def fetch_api_data():
         "tr_id": "TTTS3035R" # 해외주식 체결내역 조회 (기간)
     }
     
-    # (1) 매매 내역 조회 (2025-01-01 ~ 오늘)
+    # (1) 매매 내역 조회
     start_dt = "20250101"
     end_dt = datetime.now().strftime("%Y%m%d")
     
     trade_list = []
     
-    # 페이지네이션 (거래가 많을 경우 대비)
     next_key = ""
-    for _ in range(5): # 최대 5페이지(약 100건)까지만 조회 (안전장치)
+    for i in range(5):
         params = {
             "CANO": cano,
             "ACNT_PRDT_CD": acnt_prdt_cd,
             "STRT_DT": start_dt,
             "END_DT": end_dt,
-            "SLL_BUY_DVSN_CD": "00", # 전체
-            "CCLD_DVSN": "00",       # 전체
+            "SLL_BUY_DVSN_CD": "00",
+            "CCLD_DVSN": "00",
             "CTX_AREA_FK100": next_key,
             "CTX_AREA_NK100": ""
         }
         
-        res = requests.get(f"{base_url}/uapi/overseas-stock/v1/trading/inquire-period-ccld", headers=headers, params=params)
-        data = res.json()
+        # [디버깅] 요청 URL 확인
+        full_url = f"{base_url}/uapi/overseas-stock/v1/trading/inquire-period-ccld"
+        
+        try:
+            res = requests.get(full_url, headers=headers, params=params)
+            
+            # [수정] JSON 변환 전에 에러 체크
+            if res.status_code != 200:
+                st.error(f"❌ API 요청 실패 (Status: {res.status_code})")
+                st.code(res.text) # 에러 내용 출력
+                return None, None
+                
+            data = res.json()
+        except Exception as e:
+            st.error(f"❌ 데이터 파싱 오류 (JSONDecodeError)")
+            st.write("▼ 서버가 보낸 응답 내용 (이걸 확인해보세요):")
+            st.code(res.text) # HTML 에러 페이지가 올 경우 확인 가능
+            return None, None
         
         if data['rt_cd'] != '0':
             st.error(f"매매내역 조회 실패: {data['msg1']}")
+            st.write(f"Message Code: {data['msg_cd']}")
             break
             
         for item in data['output1']:
-            # 날짜 변환 (YYYYMMDD -> YYYY-MM-DD)
             dt_str = item['ord_dt']
             date_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
-            
-            # API 데이터 매핑
-            ticker = item['pdno'] # 종목코드
-            name = item['prdt_name'] # 종목명
+            ticker = item['pdno']
+            name = item['prdt_name']
             qty = int(item['ft_ccld_qty'])
-            price = float(item['ft_ccld_unpr3']) # 체결단가
-            type_raw = item['sll_buy_dvsn_cd'] # 01:매도, 02:매수
+            price = float(item['ft_ccld_unpr3'])
+            type_raw = item['sll_buy_dvsn_cd']
             trade_type = "Buy" if type_raw == '02' else "Sell"
-            
-            # 고유 ID 생성 (날짜 + 주문번호)
             order_id = f"{item['ord_dt']}_{item['ord_no']}"
             
             trade_list.append([
@@ -87,12 +102,10 @@ def fetch_api_data():
             
         next_key = data.get('ctx_area_fk100', '').strip()
         if not next_key: break
-        time.sleep(0.2) # API 부하 방지
+        time.sleep(0.2)
 
-    # (2) 배당 내역 조회 (입출금 내역 활용)
-    # TR_ID 변경: TTTS3031R (해외주식 거래내역)
+    # (2) 배당 내역 조회
     headers['tr_id'] = "TTTS3031R"
-    
     div_list = []
     
     params_div = {
@@ -100,35 +113,32 @@ def fetch_api_data():
         "ACNT_PRDT_CD": acnt_prdt_cd,
         "STRT_DT": start_dt,
         "END_DT": end_dt,
-        "ERNG_DVSN_CD": "01", # 전체? 
-        "WCRC_FRCR_DVSN_CD": "02", # 외화
+        "ERNG_DVSN_CD": "01",
+        "WCRC_FRCR_DVSN_CD": "02",
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": ""
     }
     
-    res_div = requests.get(f"{base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers=headers, params=params_div)
-    data_div = res_div.json()
-    
-    if data_div['rt_cd'] == '0':
-        for item in data_div['output']:
-            # 배당금 찾기 (거래명에 '배당' 포함 여부 확인)
-            # tr_name 예시: "배당금입금", "배당세" 등
-            if "배당" in item['tr_nm'] and float(item['frcr_amt']) > 0:
-                dt_str = item['tr_dt']
-                date_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
-                ticker = item['ovrs_pdno'] # 종목코드 (가끔 안 나올수도 있음)
-                amount = float(item['frcr_amt']) # 세후 금액일 확률 높음 (입금액 기준)
-                
-                # [PM 요청사항] 리얼티인컴(O) 1월 16일 건 환율 하드코딩
-                ex_rate = 1450.0 # 기본값
-                if ticker == 'O' and '2026-01-1' in date_fmt: # 날짜 대략 매칭
-                    ex_rate = 1469.7
-                
-                div_id = f"{item['tr_dt']}_{item['tr_no']}" # 고유번호
-                
-                div_list.append([
-                    date_fmt, div_id, ticker, amount, ex_rate, "API_Init"
-                ])
+    try:
+        res_div = requests.get(f"{base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers=headers, params=params_div)
+        data_div = res_div.json()
+        
+        if data_div['rt_cd'] == '0':
+            for item in data_div['output']:
+                if "배당" in item['tr_nm'] and float(item['frcr_amt']) > 0:
+                    dt_str = item['tr_dt']
+                    date_fmt = f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:]}"
+                    ticker = item['ovrs_pdno']
+                    amount = float(item['frcr_amt'])
+                    
+                    ex_rate = 1450.0
+                    if ticker == 'O' and '2026-01-1' in date_fmt:
+                        ex_rate = 1469.7
+                    
+                    div_id = f"{item['tr_dt']}_{item['tr_no']}"
+                    div_list.append([date_fmt, div_id, ticker, amount, ex_rate, "API_Init"])
+    except Exception as e:
+        st.error(f"배당 내역 조회 중 오류: {e}")
     
     return trade_list, div_list
 
