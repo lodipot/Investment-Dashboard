@@ -13,7 +13,7 @@ import KIS_API_Manager as kis
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Strategy Command", layout="wide", page_icon="📈")
 
-# 커스텀 CSS
+# 커스텀 CSS (카드, KPI, 배지 스타일)
 st.markdown("""
 <style>
     .kpi-container {
@@ -80,20 +80,20 @@ def load_db():
         exchange = pd.DataFrame(sh.worksheet("Exchange_Log").get_all_records())
         dividend = pd.DataFrame(sh.worksheet("Dividend_Log").get_all_records())
         return trade, exchange, dividend
-    except:
+    except Exception as e:
+        st.error(f"DB 로드 실패: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 def get_market_data(tickers):
     """KIS API 우선, 실패 시 Yahoo Finance 백업"""
     prices = {}
-    status = "🔴 Closed"
     source_kis = False
     
     # 1. 환율 (Yahoo가 안정적)
     try:
         fx = yf.Ticker("KRW=X").history(period="1d")['Close'].iloc[-1]
     except:
-        fx = 1450.0
+        fx = 1450.0 # Fallback
 
     # 2. 주가 조회
     if tickers:
@@ -126,7 +126,7 @@ def get_market_data(tickers):
 # -------------------------------------------------------------------
 # 4. 포트폴리오 계산 엔진 (달러 저수지 반영)
 # -------------------------------------------------------------------
-def calculate_portfolio(trade_df, dividend_df, current_prices, current_fx):
+def calculate_portfolio(trade_df, dividend_df, exchange_df, current_prices, current_fx):
     rows = []
     
     # 1. 주식 포트폴리오
@@ -142,13 +142,14 @@ def calculate_portfolio(trade_df, dividend_df, current_prices, current_fx):
         if current_qty <= 0: continue # 전량 매도 종목 제외
 
         # 평균 매수 환율 (Ex_Avg_Rate 가중평균)
-        # 공식: Sum(매수수량 * 매수단가 * 당시평단가) / Sum(매수수량 * 매수단가)
-        # 주의: 여기서는 '원화 투입 원금'을 구하기 위해 사용
-        total_principal_krw = (buy_group['Qty'] * buy_group['Price_USD'] * buy_group['Ex_Avg_Rate']).sum()
-        # 매도분 차감 (FIFO 가정 등 복잡하므로, 평단가 비례 차감으로 단순화)
-        if qty_buy > 0:
-            avg_principal_per_share = total_principal_krw / qty_buy
-            current_principal_krw = avg_principal_per_share * current_qty
+        # 원화 투입 원금 = Sum(매수수량 * 매수단가 * 당시평단가) - 매도분
+        # *단순화를 위해 매도분은 평균단가 기준으로 차감
+        total_buy_krw = (buy_group['Qty'] * buy_group['Price_USD'] * buy_group['Ex_Avg_Rate']).sum()
+        total_buy_qty = qty_buy
+        
+        if total_buy_qty > 0:
+            avg_krw_unit = total_buy_krw / total_buy_qty
+            current_principal_krw = avg_krw_unit * current_qty
         else:
             current_principal_krw = 0
 
@@ -160,16 +161,24 @@ def calculate_portfolio(trade_df, dividend_df, current_prices, current_fx):
         eval_krw = eval_usd * current_fx
         
         # 손익 계산
-        total_profit_krw = eval_krw - current_principal_krw
+        # 1. 평가손익 (Unrealized)
+        unrealized_pl = eval_krw - current_principal_krw
         
-        # 배당 수익 (해당 종목)
+        # 2. 배당 수익 (해당 종목)
         div_usd = dividend_df[dividend_df['Ticker'] == ticker]['Amount_USD'].sum() if not dividend_df.empty else 0
         div_krw = div_usd * current_fx
         
+        # 3. 실현 손익 (Realized) - 이번 버전에서는 간략히
+        # 매도 금액(KRW) - 매도 원금(KRW)
+        realized_krw = 0 # (추후 정교화 가능)
+        
         # 안전마진 (BEP 환율)
         # BEP = (원화원금 - 배당금) / 현재 달러평가액
-        bep_rate = (current_principal_krw - div_krw) / eval_usd if eval_usd > 0 else 0
-        safety_margin = current_fx - bep_rate
+        if eval_usd > 0:
+            bep_rate = (current_principal_krw - div_krw) / eval_usd
+            safety_margin = current_fx - bep_rate
+        else:
+            safety_margin = 0
 
         rows.append({
             'Ticker': ticker,
@@ -177,99 +186,122 @@ def calculate_portfolio(trade_df, dividend_df, current_prices, current_fx):
             'Qty': current_qty,
             'Principal': current_principal_krw,
             'Eval': eval_krw,
-            'Total_Profit': total_profit_krw + div_krw, # 배당 포함 총수익
-            'Unrealized': total_profit_krw, # 단순 평가손익
+            'Total_Profit': unrealized_pl + div_krw + realized_krw, 
+            'Unrealized': unrealized_pl,
             'Div_Krw': div_krw,
             'Safety_Margin': safety_margin
         })
 
-    # 2. 현금 (달러 예수금)
-    # Trade_Log 역산 or Exchange_Log의 마지막 Balance 사용? 
-    # API 동기화 기능이 있으므로 Trade_Log 재계산 로직을 믿음
-    # (여기서는 편의상 Trade_Log의 마지막 행 Ex_Avg_Rate 사용 불가하므로 재계산 필요. 
-    #  하지만 성능상 Exchange_Log의 마지막 Balance를 신뢰하는게 좋음)
-    
-    # 임시: API 동기화 버튼을 눌렀다고 가정하고 Exchange_Log 계산 로직 사용
-    # 복잡성을 줄이기 위해 화면 표시용으로는 간략 계산
+    # 2. 현금 (달러 예수금) - Exchange_Log 최신 Balance 사용
+    if not exchange_df.empty:
+        last_ex = exchange_df.iloc[-1]
+        cash_usd = float(last_ex['Balance'])
+        cash_rate = float(last_ex['Avg_Rate'])
+        
+        cash_principal = cash_usd * cash_rate
+        cash_eval = cash_usd * current_fx
+        cash_profit = cash_eval - cash_principal
+        
+        rows.append({
+            'Ticker': '💵 USD CASH',
+            'Name': '달러예수금',
+            'Qty': cash_usd,
+            'Principal': cash_principal,
+            'Eval': cash_eval,
+            'Total_Profit': cash_profit,
+            'Unrealized': cash_profit,
+            'Div_Krw': 0,
+            'Safety_Margin': 9999 # 화면 표시시 '-' 처리
+        })
     
     return pd.DataFrame(rows)
 
 # -------------------------------------------------------------------
-# 5. API 동기화 및 DB 업데이트 함수 (핵심 기능)
+# 5. API 동기화 및 DB 업데이트 함수 (Sync Logic)
 # -------------------------------------------------------------------
 def sync_api_and_update_db():
     try:
-        # 1. API 데이터 가져오기
-        token = kis.get_access_token()
-        if not token: return False, "토큰 발급 실패"
-        
-        # 1/18일 이후 데이터 조회 (API)
-        headers = {"content-type":"application/json", "authorization":f"Bearer {token}", "appkey":st.secrets["kis_api"]["APP_KEY"], "appsecret":st.secrets["kis_api"]["APP_SECRET"], "tr_id":"CTOS4001R"}
-        params = {
-            "CANO": st.secrets["kis_api"]["CANO"], "ACNT_PRDT_CD": st.secrets["kis_api"]["ACNT_PRDT_CD"],
-            "ERLM_STRT_DT": "20260118", "ERLM_END_DT": datetime.now().strftime("%Y%m%d"),
-            "SLL_BUY_DVSN_CD": "00", "CCLD_DVSN": "00", "OVRS_EXCG_CD": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
-        }
-        
-        new_trades = []
-        res = requests.get(f"{kis.URL_BASE}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers=headers, params=params)
-        data = res.json()
-        if data['rt_cd'] == '0':
-            for item in data['output1']:
-                if '매수' in item['sll_buy_dvsn_name'] or '매도' in item['sll_buy_dvsn_name']:
-                    qty = int(float(item['ccld_qty']))
-                    if qty > 0:
-                        dt = item['trad_dt']
-                        price = float(item['ft_ccld_unpr2'])
-                        if price == 0: price = float(item['ovrs_stck_ccld_unpr'])
-                        
-                        new_trades.append({
-                            'Date': f"{dt[:4]}-{dt[4:6]}-{dt[6:]}",
-                            'Order_ID': f"API_{dt}_{item['pdno']}_{qty}",
-                            'Ticker': item['pdno'],
-                            'Name': item['ovrs_item_name'],
-                            'Type': 'Buy' if '매수' in item['sll_buy_dvsn_name'] else 'Sell',
-                            'Qty': qty,
-                            'Price_USD': price,
-                            'Note': 'API_Sync'
-                        })
-        
-        # 2. 기존 DB 로드 (수기 데이터 포함)
+        # 1. 기존 DB 로드
         sh = get_client()
         trade_data = sh.worksheet("Trade_Log").get_all_records()
         ex_data = sh.worksheet("Exchange_Log").get_all_records()
-        div_data = sh.worksheet("Dividend_Log").get_all_records()
         
-        # 3. 데이터 병합 (중복 제거)
         df_trade = pd.DataFrame(trade_data)
-        existing_ids = df_trade['Order_ID'].astype(str).tolist()
+        df_ex = pd.DataFrame(ex_data)
         
-        added_count = 0
-        for t in new_trades:
-            if t['Order_ID'] not in existing_ids:
-                # 환율 보정 (YFinance)
-                try:
-                    fx = yf.download("KRW=X", start=t['Date'], end=str(datetime.now().date()), progress=False)['Close'].iloc[0]
-                except: fx = 1450.0
-                
-                # Ex_Avg_Rate 계산 (간이 로직: 이전 값 유지)
-                last_rate = df_trade['Ex_Avg_Rate'].iloc[-1] if not df_trade.empty else 1450.0
-                if t['Type'] == 'Buy': # 매수 시 평단가는 유지 (물 쓰기)
-                    applied_rate = last_rate 
-                else: 
-                    applied_rate = last_rate
+        # 마지막 동기화 날짜 확인 (또는 3일 전부터 검색)
+        if not df_trade.empty:
+            last_date = pd.to_datetime(df_trade['Date']).max()
+            start_dt = (last_date - timedelta(days=5)).strftime("%Y%m%d") # 안전하게 5일 전
+        else:
+            start_dt = "20240101"
+            
+        end_dt = datetime.now().strftime("%Y%m%d")
+        
+        # 2. API 호출
+        token = kis.get_access_token()
+        if not token: return False, "토큰 발급 실패"
+        
+        headers = {"content-type":"application/json", "authorization":f"Bearer {token}", "appkey":st.secrets["kis_api"]["APP_KEY"], "appsecret":st.secrets["kis_api"]["APP_SECRET"], "tr_id":"CTOS4001R"}
+        params = {
+            "CANO": st.secrets["kis_api"]["CANO"], "ACNT_PRDT_CD": st.secrets["kis_api"]["ACNT_PRDT_CD"],
+            "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt,
+            "SLL_BUY_DVSN_CD": "00", "CCLD_DVSN": "00", "OVRS_EXCG_CD": "", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+        }
+        
+        res = requests.get(f"{st.secrets['kis_api']['URL_BASE']}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers=headers, params=params)
+        data = res.json()
+        
+        new_trades = []
+        if data['rt_cd'] == '0':
+            existing_ids = df_trade['Order_ID'].astype(str).tolist() if not df_trade.empty else []
+            
+            # 최신 평단가 가져오기 (Exchange_Log)
+            current_avg_rate = float(df_ex['Avg_Rate'].iloc[-1]) if not df_ex.empty else 1450.0
+            
+            for item in data['output1']:
+                dvsn = item.get('sll_buy_dvsn_name', '')
+                if '매수' in dvsn or '매도' in dvsn:
+                    dt = item['trad_dt']
+                    qty = int(float(item['ccld_qty']))
+                    # ID 생성
+                    order_id = f"API_{dt}_{item['pdno']}_{qty}"
                     
-                new_row = [t['Date'], t['Order_ID'], t['Ticker'], t['Name'], t['Type'], t['Qty'], t['Price_USD'], applied_rate, t['Note']]
-                sh.worksheet("Trade_Log").append_row(new_row)
-                added_count += 1
+                    if order_id not in existing_ids and qty > 0:
+                        price = float(item.get('ft_ccld_unpr2', 0))
+                        if price == 0: price = float(item.get('ovrs_stck_ccld_unpr', 0))
+                        
+                        t_type = 'Buy' if '매수' in dvsn else 'Sell'
+                        
+                        # [핵심] Buy일 때 현재 평단가 적용, Sell일 때도 일단 현재 평단가 유지
+                        applied_rate = current_avg_rate
+                        
+                        new_trades.append([
+                            f"{dt[:4]}-{dt[4:6]}-{dt[6:]}", # Date
+                            order_id, # Order_ID
+                            item['pdno'], # Ticker
+                            item['ovrs_item_name'], # Name
+                            t_type, # Type
+                            qty, # Qty
+                            price, # Price
+                            applied_rate, # Ex_Avg_Rate (자동입력)
+                            'API_Sync' # Note
+                        ])
         
-        return True, f"{added_count}건 업데이트 완료"
-        
+        # 3. 저장
+        if new_trades:
+            # 시간순 정렬 후 저장 (API는 역순일 수 있음)
+            new_trades.sort(key=lambda x: x[0])
+            sh.worksheet("Trade_Log").append_rows(new_trades)
+            return True, f"{len(new_trades)}건 업데이트 완료"
+        else:
+            return True, "최신 내역임 (업데이트 없음)"
+            
     except Exception as e:
         return False, str(e)
 
 # -------------------------------------------------------------------
-# 6. 메인 UI
+# 6. 메인 UI (탭 구성)
 # -------------------------------------------------------------------
 st.title("🚀 Investment Command Center")
 
@@ -279,7 +311,7 @@ with tab1:
     trade_df, ex_df, div_df = load_db()
     
     if trade_df.empty:
-        st.error("DB가 비어있습니다. '입력 매니저'에서 동기화를 실행하세요.")
+        st.error("DB 로드 실패. [입력 매니저] 탭을 확인하세요.")
     else:
         # 상단 상태바
         tickers = trade_df['Ticker'].unique().tolist()
@@ -287,7 +319,7 @@ with tab1:
         st.markdown(f"<div style='text-align:right; margin-bottom:10px;'>{status_html}</div>", unsafe_allow_html=True)
 
         # 포트폴리오 계산
-        pf_df = calculate_portfolio(trade_df, div_df, price_map, fx)
+        pf_df = calculate_portfolio(trade_df, div_df, ex_df, price_map, fx)
         
         # KPI 섹션
         total_eval = pf_df['Eval'].sum()
@@ -305,7 +337,7 @@ with tab1:
             <div class="kpi-cube">
                 <div class="kpi-title">총 수익률</div>
                 <div class="kpi-value {'c-red' if roi>0 else 'c-blue'}">{roi:+.2f}%</div>
-                <div class="kpi-sub">Benchmark 3.5%</div>
+                <div class="kpi-sub">Benchmark {BENCHMARK_RATE*100}%</div>
             </div>
             <div class="kpi-cube">
                 <div class="kpi-title">누적 수익금</div>
@@ -377,7 +409,7 @@ with tab2:
     col_btn, col_msg = st.columns([1, 3])
     with col_btn:
         if st.button("🔄 거래내역 동기화 (API)", type="primary"):
-            with st.spinner("KIS API 접속 중..."):
+            with st.spinner("KIS API 접속 및 DB 동기화 중..."):
                 res, msg = sync_api_and_update_db()
                 if res: 
                     st.success(msg)
@@ -386,7 +418,7 @@ with tab2:
                     st.rerun()
                 else: st.error(f"실패: {msg}")
     with col_msg:
-        st.info("오늘/어제 체결된 매매 내역을 가져와 DB에 추가합니다. (환전/배당 제외)")
+        st.info("API를 통해 최신 매매 내역을 가져오고, '현재 이동평균 환율'을 적용하여 저장합니다.")
     
     st.divider()
     
@@ -416,7 +448,11 @@ with tab2:
             usd_out = st.number_input("환전 달러 (USD)", min_value=1.0)
             if st.form_submit_button("환전 기록 저장"):
                 rate = krw_in / usd_out if usd_out > 0 else 0
+                
+                # [중요] 환전 시 이동평균 환율 재계산 로직 필요
+                # 여기선 단순 저장을 하고, 완벽한 재계산은 별도 '전체 재계산' 버튼이 필요할 수 있음
+                # 일단은 단순 추가
                 sh = get_client()
                 sh.worksheet("Exchange_Log").append_row([str(input_date), f"EX_{datetime.now().strftime('%H%M%S')}", "KRW_to_USD", krw_in, usd_out, rate, 0, 0, "수동"])
-                st.success("저장 완료 (Avg_Rate는 다음 동기화 시 갱신됨)")
+                st.success("저장 완료 (정확한 평단가는 '전체 재계산'시 반영됩니다)")
                 st.cache_data.clear()
