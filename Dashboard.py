@@ -41,6 +41,7 @@ st.markdown("""
     .txt-blue { color: #448AFF !important; }
     .bg-red { background-color: rgba(255, 82, 82, 0.15) !important; }
     .bg-blue { background-color: rgba(68, 138, 255, 0.15) !important; }
+    .txt-orange { color: #FF9800 !important; }
     
     /* Stock Card */
     .stock-card {
@@ -155,17 +156,20 @@ def process_timeline(df_trade, df_money):
             ticker = str(row.get('Ticker', '')).strip()
             if ticker == '' or ticker == '-': ticker = 'Cash'
             
+            # 배당금 집계
             if 'dividend' in t_type or '배당' in t_type:
                 if ticker != 'Cash':
                     if ticker not in portfolio: portfolio[ticker] = {'qty':0, 'invested_krw':0, 'realized_krw':0, 'accum_div_usd':0}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
             
+            # 저수지 계산
             current_balance += usd_amt
             if current_balance > 0.0001:
                 prev_val = (current_balance - usd_amt) * current_avg_rate
                 added_val = 0 if ('dividend' in t_type or '배당' in t_type) else krw_amt
                 current_avg_rate = (prev_val + added_val) / current_balance
                 
+            # 빈칸 채우기 (메모리)
             df_money.loc[df_money['Order_ID'] == row['Order_ID'], 'Avg_Rate'] = current_avg_rate
             df_money.loc[df_money['Order_ID'] == row['Order_ID'], 'Balance'] = current_balance
 
@@ -179,6 +183,7 @@ def process_timeline(df_trade, df_money):
             
             if 'buy' in t_type or '매수' in t_type:
                 current_balance -= amount
+                # 매수 시점의 환율 확정 (Ex_Avg_Rate)
                 ex_rate = safe_float(row.get('Ex_Avg_Rate'))
                 if ex_rate == 0: 
                     ex_rate = current_avg_rate
@@ -189,6 +194,7 @@ def process_timeline(df_trade, df_money):
                 
             elif 'sell' in t_type or '매도' in t_type:
                 current_balance += amount
+                # 실현손익 계산 (KRW 기준) - 매도 시점의 저수지 평단으로 환산
                 sell_val_krw = amount * current_avg_rate 
                 
                 if portfolio[ticker]['qty'] > 0:
@@ -303,7 +309,7 @@ def main():
         if st.button("🔄 API Sync"):
             sync_api_data(sheet_instance, u_trade, u_money)
 
-    # KPI
+    # KPI Cube (Updated)
     kpi_html = f"""
     <div class="kpi-container">
         <div class="kpi-card">
@@ -314,9 +320,10 @@ def main():
             </div>
         </div>
         <div class="kpi-card">
-            <div class="kpi-title">달러 저수지 (Reservoir)</div>
+            <div class="kpi-title">달러 잔고 (USD Balance)</div>
             <div class="kpi-main">$ {cur_bal:,.2f}</div>
-            <div class="kpi-sub">Avg Rate: ₩ {cur_rate:,.2f}</div>
+            <div class="kpi-sub">매수환율: ₩ {cur_rate:,.2f}</div>
+            <div style="color: #FF9800; font-size: 0.9rem; margin-top: 4px;">현재환율: ₩ {cur_real_rate:,.2f}</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-title">안전마진 (Safety Margin)</div>
@@ -330,7 +337,7 @@ def main():
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # Tab 1: Dashboard
+    # [Tab 1] 대시보드 (카드)
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -389,9 +396,8 @@ def main():
                     st.markdown(html, unsafe_allow_html=True)
                 idx += 1
 
-    # Tab 2: Integrated Table (HTML Fix)
+    # [Tab 2] Integrated Table (HTML)
     with tab2:
-        # 헤더 생성
         table_html = """
         <table class="int-table">
             <thead>
@@ -430,7 +436,7 @@ def main():
             div_krw = data['accum_div_usd'] * cur_real_rate
             
             total_pl = eval_krw - invested_krw + data['realized_krw'] + div_krw
-            unrealized_pl = eval_krw - invested_krw # 평가손익 (환손익 포함됨)
+            unrealized_pl = eval_krw - invested_krw 
             realized_total = data['realized_krw'] + div_krw
             
             bep_tk = (invested_krw - realized_total) / (qty * cur_p) if (qty*cur_p) > 0 else 0
@@ -445,11 +451,9 @@ def main():
             sum_realized += realized_total
             sum_total_pl += total_pl
             
-            # HTML Row construction (No indentation to prevent markdown issues)
             row_html = f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{cls_pl}'>{unrealized_pl:,.0f}</td><td>-</td><td>{realized_total:,.0f}</td><td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td><td>{margin_tk:+.1f}</td></tr>"
             table_html += row_html
             
-        # Cash & Total Rows
         cash_krw = cur_bal * cur_real_rate
         final_pl_calc = (sum_eval_krw + cash_krw) - total_input_principal
         cls_fin = "txt-red" if final_pl_calc >= 0 else "txt-blue"
@@ -460,14 +464,14 @@ def main():
         
         st.markdown(table_html, unsafe_allow_html=True)
 
-    # Tab 3: Log
+    # [Tab 3] 통합 로그
     with tab3:
         merged_log = pd.concat([u_money, u_trade], ignore_index=True)
         merged_log['Order_ID'] = pd.to_numeric(merged_log['Order_ID']).fillna(0)
         merged_log = merged_log.sort_values(['Order_ID', 'Date'], ascending=[False, False])
         st.dataframe(merged_log.fillna(''), use_container_width=True)
 
-    # Tab 4: Input
+    # [Tab 4] 입력 매니저
     with tab4:
         st.subheader("📝 환전 & 배당 입력")
         with st.form("input_form"):
