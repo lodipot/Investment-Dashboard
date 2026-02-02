@@ -8,105 +8,164 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 스타일 (색상 롤백 & 배경 조정)
+# [1] 설정 & 스타일 (Gemini Theme Fixed)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
-# 색상 정의 (User Request: 직전 버전 원색 복귀 + 카드 배경 톤다운)
-COLOR_RED = "#FF5252"       # 선명한 빨강 (수익)
-COLOR_BLUE = "#448AFF"      # 선명한 파랑 (손실)
-COLOR_BG_RED = "rgba(255, 82, 82, 0.15)"
-COLOR_BG_BLUE = "rgba(68, 138, 255, 0.15)"
-COLOR_CARD_BG = "#18181A"   # 기존(#1E1F20)보다 어둡고, 전체배경(#131314)보다 아주 살짝 밝음
+# [색상 팔레트 정의]
+# 1. 배경색 (User Request)
+THEME_BG = "#131314"        # 앱 전체 배경 (제미나이 다크)
+THEME_CARD = "#18181A"      # 카드/컨테이너 배경 (전체 배경보다 살짝 밝음)
+THEME_BORDER = "#444746"    # 테두리 (은은한 회색)
+THEME_TEXT = "#E3E3E3"      # 기본 텍스트 (눈이 편안한 흰색)
+THEME_SUB = "#C4C7C5"       # 보조 텍스트
+
+# 2. 상태 색상 (Rollback to Vivid Colors)
+COLOR_RED = "#FF5252"       # 수익 (선명한 빨강)
+COLOR_BLUE = "#448AFF"      # 손실 (선명한 파랑)
+COLOR_BG_RED = "rgba(255, 82, 82, 0.15)"    # 수익 배경 (투명도)
+COLOR_BG_BLUE = "rgba(68, 138, 255, 0.15)"  # 손실 배경 (투명도)
 
 st.markdown(f"""
 <style>
-    /* Global Font */
-    html, body, [class*="css"] {{ font-family: 'Pretendard', sans-serif; }}
+    /* 1. 전체 배경화면 고정 (필수) */
+    .stApp {{
+        background-color: {THEME_BG} !important;
+        color: {THEME_TEXT} !important;
+    }}
 
-    /* KPI Grid */
+    /* 2. 헤더/메뉴 숨김 (깔끔하게) */
+    header {{visibility: hidden;}}
+    .block-container {{ padding-top: 1.5rem; }}
+    
+    /* 3. KPI Grid Style */
     .kpi-container {{
         display: grid;
         grid-template-columns: 2fr 1.5fr 1.5fr;
-        gap: 15px;
-        margin-bottom: 20px;
+        gap: 16px;
+        margin-bottom: 24px;
     }}
     .kpi-card {{
-        background-color: {COLOR_CARD_BG};
-        padding: 20px;
-        border-radius: 12px;
-        border: 1px solid #333;
+        background-color: {THEME_CARD};
+        padding: 24px;
+        border-radius: 16px;
+        border: 1px solid {THEME_BORDER};
         text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
     }}
-    .kpi-title {{ font-size: 1rem; color: #AAAAAA; margin-bottom: 5px; }}
-    .kpi-main {{ font-size: 2rem; font-weight: 800; color: #FFFFFF; }}
-    .kpi-sub {{ font-size: 1.1rem; margin-top: 5px; font-weight: 600; }}
+    .kpi-title {{ font-size: 0.95rem; color: {THEME_SUB}; margin-bottom: 8px; font-weight: 500; }}
+    .kpi-main {{ font-size: 2.2rem; font-weight: 800; color: {THEME_TEXT}; letter-spacing: -0.5px; }}
+    .kpi-sub {{ font-size: 1.1rem; margin-top: 8px; font-weight: 600; color: {THEME_SUB}; }}
     
-    /* Colors (Rollback) */
+    /* 4. Color Classes */
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
+    .txt-orange {{ color: #FF9800 !important; }}
     .bg-red {{ background-color: {COLOR_BG_RED} !important; }}
     .bg-blue {{ background-color: {COLOR_BG_BLUE} !important; }}
-    .txt-orange {{ color: #FF9800 !important; }}
     
-    /* Stock Card (Darker BG) */
+    /* 5. Stock Card Style */
     .stock-card {{
-        background-color: {COLOR_CARD_BG};
-        border-radius: 12px;
-        padding: 16px;
+        background-color: {THEME_CARD};
+        border-radius: 16px;
+        padding: 20px;
         margin-bottom: 16px;
+        border: 1px solid {THEME_BORDER};
         border-left: 6px solid #555;
-        transition: transform 0.2s;
+        transition: transform 0.2s, box-shadow 0.2s;
     }}
-    .stock-card:hover {{ transform: translateY(-3px); }}
+    .stock-card:hover {{
+        transform: translateY(-4px);
+        box-shadow: 0 6px 12px rgba(0,0,0,0.4);
+    }}
     .card-up {{ border-left-color: {COLOR_RED} !important; }}
     .card-down {{ border-left-color: {COLOR_BLUE} !important; }}
     
-    .card-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }}
-    .card-ticker {{ font-size: 1.4rem; font-weight: 900; color: #FFF; }}
-    .card-price {{ font-size: 1.0rem; font-weight: 500; color: #BBB; }}
+    .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }}
+    .card-ticker {{ font-size: 1.4rem; font-weight: 900; color: {THEME_TEXT}; }}
+    .card-price {{ font-size: 1.1rem; font-weight: 500; color: {THEME_SUB}; }}
     
-    .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: #FFF; text-align: right; letter-spacing: -0.5px; }}
-    .card-sub-box {{ text-align: right; margin-top: -2px; }}
+    .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: {THEME_TEXT}; text-align: right; margin-bottom: 4px; letter-spacing: -0.5px; }}
+    .card-sub-box {{ text-align: right; font-size: 1.0rem; font-weight: 600; }}
     .pl-amt {{ font-size: 1.1rem; font-weight: 700; margin-right: 6px; }}
     .pl-pct {{ font-size: 0.95rem; font-weight: 500; opacity: 0.9; }}
     
-    /* Detail Table inside Card */
-    .detail-table {{ width: 100%; font-size: 0.85rem; color: #DDD; margin-top: 12px; border-top: 1px solid #444; }}
-    .detail-table td {{ padding: 5px 0; border-bottom: 1px solid #333; }}
+    /* 6. Detail Table (Card Expander) */
+    .detail-table {{ width: 100%; font-size: 0.9rem; color: {THEME_SUB}; margin-top: 16px; border-top: 1px solid {THEME_BORDER}; }}
+    .detail-table td {{ padding: 8px 0; border-bottom: 1px solid #333; }}
     .detail-table tr:last-child td {{ border-bottom: none; }}
     .text-right {{ text-align: right; }}
     
-    /* Integrated Table (HTML Fix) */
-    .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; text-align: right; color: #EEE; }}
-    .int-table th {{ background-color: #252627; color: #FFF; padding: 12px 8px; text-align: right; border-bottom: 2px solid #555; }}
+    /* 7. Integrated Table (HTML) */
+    .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; text-align: right; color: {THEME_TEXT}; }}
+    .int-table th {{ 
+        background-color: #252627; 
+        color: {THEME_SUB}; 
+        padding: 14px 10px; 
+        text-align: right; 
+        border-bottom: 1px solid {THEME_BORDER}; 
+        font-weight: 600;
+    }}
     .int-table th:first-child {{ text-align: left; }}
-    .int-table td {{ padding: 10px 8px; border-bottom: 1px solid #444; }}
-    .int-table td:first-child {{ text-align: left; font-weight: bold; color: #FFF; }}
-    .row-total {{ background-color: #333; font-weight: bold; border-top: 2px solid #666; }}
-    .row-cash {{ background-color: #1A1A1A; font-style: italic; color: #AAA; }}
+    .int-table td {{ padding: 12px 10px; border-bottom: 1px solid #2D2E30; }}
+    .int-table td:first-child {{ text-align: left; font-weight: 700; color: #A8C7FA; }}
+    
+    .row-total {{ background-color: #2A2B2D; font-weight: 800; border-top: 2px solid {THEME_BORDER}; }}
+    .row-cash {{ background-color: {THEME_BG}; font-style: italic; color: {THEME_SUB}; }}
+
+    /* UI Elements Override */
+    .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
+    .stTabs [data-baseweb="tab"] {{
+        background-color: {THEME_CARD};
+        border-radius: 8px;
+        color: {THEME_SUB};
+        padding: 6px 16px;
+        border: 1px solid {THEME_BORDER};
+    }}
+    .stTabs [aria-selected="true"] {{
+        background-color: #3C4043 !important;
+        color: #A8C7FA !important;
+        border-color: #A8C7FA !important;
+    }}
+    .stButton > button {{
+        background-color: {THEME_CARD};
+        color: #A8C7FA;
+        border: 1px solid {THEME_BORDER};
+        border-radius: 8px;
+    }}
+    .stButton > button:hover {{
+        background-color: #303134;
+        border-color: #A8C7FA;
+    }}
+    
+    /* Input Form */
+    [data-testid="stForm"] {{ background-color: {THEME_CARD}; border: 1px solid {THEME_BORDER}; border-radius: 16px; padding: 20px; }}
 </style>
 """, unsafe_allow_html=True)
 
-# 섹터 정의
+# -------------------------------------------------------------------
+# [2] 상수 및 데이터 정의 (순서 수정 완료)
+# -------------------------------------------------------------------
+# 섹터 매핑
 SECTOR_MAP = {
-    'NVDA': '테크', 'AMD': '테크', 'TSM': '테크', 'AVGO': '테크', 'SOXL': '테크', 'GOOGL': '테크', 'MSFT': '테크', 'AAPL': '테크', 'AMZN': '테크', 'TSLA': '테크',
-    'O': '배당', 'KO': '배당', 'SCHD': '배당', 'JEPQ': '배당', 'JEPI': '배당', 'MAIN': '배당',
+    'GOOGL': '테크', 'NVDA': '테크', 'AMD': '테크', 'TSM': '테크', 'MSFT': '테크', 'AAPL': '테크', 'AMZN': '테크', 'TSLA': '테크', 'AVGO': '테크', 'SOXL': '테크',
+    'O': '배당', 'JEPI': '배당', 'JEPQ': '배당', 'SCHD': '배당', 'MAIN': '배당', 'KO': '배당',
     'PLD': '리츠', 'AMT': '리츠'
 }
 
-# 정렬 순서 (커스텀)
+# ★★★ 중요: 화면에 표시될 순서 (리스트 순서대로 출력됨) ★★★
 SECTOR_ORDER_LIST = {
     '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO'], 
-    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'],
+    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'], # 구글 1순위 적용
     '리츠': ['PLD', 'AMT'],
-    '기타': [] 
+    '기타': [] # 나머지 종목 자동 배정
 }
+
+# 통합 테이블 정렬 순서 (Total을 제외한 종목들)
 SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM']
 
 # -------------------------------------------------------------------
-# [2] 데이터 로드 및 유틸리티
+# [3] 유틸리티 & 데이터 로드
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -141,7 +200,7 @@ def get_realtime_rate():
     return 1450.0
 
 # -------------------------------------------------------------------
-# [3] 달러 저수지 엔진 (Logic)
+# [4] 엔진: 달러 저수지 & 포트폴리오 계산
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money):
     df_money['Source'] = 'Money'
@@ -206,6 +265,7 @@ def process_timeline(df_trade, df_money):
                 
             elif 'sell' in t_type or '매도' in t_type:
                 current_balance += amount
+                # 매도 시점의 저수지 평단으로 환산한 실현가치
                 sell_val_krw = amount * current_avg_rate 
                 
                 if portfolio[ticker]['qty'] > 0:
@@ -221,7 +281,7 @@ def process_timeline(df_trade, df_money):
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
 # -------------------------------------------------------------------
-# [4] Sync Logic
+# [5] Sync Logic
 # -------------------------------------------------------------------
 def sync_api_data(sheet_instance, df_trade, df_money):
     ws_trade = sheet_instance.worksheet("Trade_Log")
@@ -271,7 +331,7 @@ def sync_api_data(sheet_instance, df_trade, df_money):
     st.rerun()
 
 # -------------------------------------------------------------------
-# [5] 메인 앱
+# [6] Main App
 # -------------------------------------------------------------------
 def main():
     try:
@@ -413,7 +473,6 @@ def main():
 
     # [Tab 2] Integrated Table (Safe HTML)
     with tab2:
-        # Table Header
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
         
         all_keys = list(portfolio.keys())
