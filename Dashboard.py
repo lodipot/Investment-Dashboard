@@ -8,158 +8,105 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 스타일 (Gemini Dark Theme 적용)
+# [1] 설정 & 스타일 (색상 롤백 & 배경 조정)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
-# 제미나이 다크 테마 색상 팔레트
-THEME_BG = "#131314"        # 앱 전체 배경 (Deep Dark Gray)
-THEME_CARD = "#1E1F20"      # 카드/컨테이너 배경 (Lighter Dark Gray)
-THEME_TEXT = "#E3E3E3"      # 기본 텍스트 (Off-White)
-THEME_SUB = "#C4C7C5"       # 보조 텍스트 (Light Gray)
-THEME_BORDER = "#444746"    # 테두리 (Dark Gray)
-THEME_ACCENT = "#A8C7FA"    # 포인트 (Google Blue)
-THEME_RED = "#F2B8B5"       # 수익/상승 (Pastel Red - Dark Mode용)
-THEME_BLUE = "#A8C7FA"      # 손실/하락 (Pastel Blue - Dark Mode용)
+# 색상 정의 (User Request: 직전 버전 원색 복귀 + 카드 배경 톤다운)
+COLOR_RED = "#FF5252"       # 선명한 빨강 (수익)
+COLOR_BLUE = "#448AFF"      # 선명한 파랑 (손실)
+COLOR_BG_RED = "rgba(255, 82, 82, 0.15)"
+COLOR_BG_BLUE = "rgba(68, 138, 255, 0.15)"
+COLOR_CARD_BG = "#18181A"   # 기존(#1E1F20)보다 어둡고, 전체배경(#131314)보다 아주 살짝 밝음
 
 st.markdown(f"""
 <style>
-    /* 1. 전체 앱 강제 다크 모드 스타일링 */
-    .stApp {{
-        background-color: {THEME_BG} !important;
-        color: {THEME_TEXT} !important;
-    }}
-    
-    /* 2. 헤더, 푸터, 사이드바 등 불필요한 요소 숨김/조정 */
-    header {{visibility: hidden;}}
-    .block-container {{ padding-top: 1.5rem; }}
+    /* Global Font */
+    html, body, [class*="css"] {{ font-family: 'Pretendard', sans-serif; }}
 
-    /* 3. KPI Grid (제미나이 스타일) */
+    /* KPI Grid */
     .kpi-container {{
         display: grid;
         grid-template-columns: 2fr 1.5fr 1.5fr;
-        gap: 16px;
-        margin-bottom: 24px;
+        gap: 15px;
+        margin-bottom: 20px;
     }}
     .kpi-card {{
-        background-color: {THEME_CARD};
-        padding: 24px;
-        border-radius: 16px;
-        border: 1px solid {THEME_BORDER};
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-    }}
-    .kpi-title {{ font-size: 0.95rem; color: {THEME_SUB}; margin-bottom: 8px; font-weight: 500; }}
-    .kpi-main {{ font-size: 2.2rem; font-weight: 700; color: {THEME_TEXT}; letter-spacing: -0.5px; }}
-    .kpi-sub {{ font-size: 1.0rem; margin-top: 8px; font-weight: 500; color: {THEME_SUB}; }}
-    
-    /* 색상 유틸리티 */
-    .txt-red {{ color: #FF8A80 !important; }}  /* 파스텔 레드 */
-    .txt-blue {{ color: #82B1FF !important; }} /* 파스텔 블루 */
-    .txt-orange {{ color: #FFD180 !important; }} /* 파스텔 오렌지 */
-    .bg-red {{ background-color: rgba(255, 138, 128, 0.15) !important; }}
-    .bg-blue {{ background-color: rgba(130, 177, 255, 0.15) !important; }}
-    
-    /* 4. Stock Card (카드 UI) */
-    .stock-card {{
-        background-color: {THEME_CARD};
-        border-radius: 16px;
+        background-color: {COLOR_CARD_BG};
         padding: 20px;
+        border-radius: 12px;
+        border: 1px solid #333;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }}
+    .kpi-title {{ font-size: 1rem; color: #AAAAAA; margin-bottom: 5px; }}
+    .kpi-main {{ font-size: 2rem; font-weight: 800; color: #FFFFFF; }}
+    .kpi-sub {{ font-size: 1.1rem; margin-top: 5px; font-weight: 600; }}
+    
+    /* Colors (Rollback) */
+    .txt-red {{ color: {COLOR_RED} !important; }}
+    .txt-blue {{ color: {COLOR_BLUE} !important; }}
+    .bg-red {{ background-color: {COLOR_BG_RED} !important; }}
+    .bg-blue {{ background-color: {COLOR_BG_BLUE} !important; }}
+    .txt-orange {{ color: #FF9800 !important; }}
+    
+    /* Stock Card (Darker BG) */
+    .stock-card {{
+        background-color: {COLOR_CARD_BG};
+        border-radius: 12px;
+        padding: 16px;
         margin-bottom: 16px;
-        border: 1px solid {THEME_BORDER};
-        border-left-width: 6px; /* 왼쪽 포인트 라인 */
-        transition: transform 0.2s, box-shadow 0.2s;
+        border-left: 6px solid #555;
+        transition: transform 0.2s;
     }}
-    .stock-card:hover {{
-        transform: translateY(-4px);
-        box-shadow: 0 6px 12px rgba(0,0,0,0.4);
-    }}
-    .card-up {{ border-left-color: #FF8A80 !important; }}
-    .card-down {{ border-left-color: #82B1FF !important; }}
+    .stock-card:hover {{ transform: translateY(-3px); }}
+    .card-up {{ border-left-color: {COLOR_RED} !important; }}
+    .card-down {{ border-left-color: {COLOR_BLUE} !important; }}
     
-    .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }}
-    .card-ticker {{ font-size: 1.4rem; font-weight: 800; color: {THEME_TEXT}; }}
-    .card-price {{ font-size: 1.1rem; font-weight: 500; color: {THEME_SUB}; }}
+    .card-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }}
+    .card-ticker {{ font-size: 1.4rem; font-weight: 900; color: #FFF; }}
+    .card-price {{ font-size: 1.0rem; font-weight: 500; color: #BBB; }}
     
-    .card-main-val {{ font-size: 1.6rem; font-weight: 700; color: {THEME_TEXT}; text-align: right; margin-bottom: 4px; }}
-    .card-sub-box {{ text-align: right; font-size: 1.0rem; font-weight: 600; }}
+    .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: #FFF; text-align: right; letter-spacing: -0.5px; }}
+    .card-sub-box {{ text-align: right; margin-top: -2px; }}
+    .pl-amt {{ font-size: 1.1rem; font-weight: 700; margin-right: 6px; }}
+    .pl-pct {{ font-size: 0.95rem; font-weight: 500; opacity: 0.9; }}
     
-    /* 5. Detail Table (카드 내부) */
-    .detail-table {{ width: 100%; font-size: 0.9rem; color: {THEME_SUB}; margin-top: 16px; border-top: 1px solid {THEME_BORDER}; }}
-    .detail-table td {{ padding: 8px 0; border-bottom: 1px solid #333; }}
+    /* Detail Table inside Card */
+    .detail-table {{ width: 100%; font-size: 0.85rem; color: #DDD; margin-top: 12px; border-top: 1px solid #444; }}
+    .detail-table td {{ padding: 5px 0; border-bottom: 1px solid #333; }}
     .detail-table tr:last-child td {{ border-bottom: none; }}
     .text-right {{ text-align: right; }}
     
-    /* 6. Integrated Table (통합 테이블) */
-    .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; text-align: right; color: {THEME_TEXT}; }}
-    .int-table th {{ 
-        background-color: #252627; 
-        color: {THEME_SUB}; 
-        padding: 14px 10px; 
-        text-align: right; 
-        border-bottom: 1px solid {THEME_BORDER}; 
-        font-weight: 600;
-    }}
+    /* Integrated Table (HTML Fix) */
+    .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; text-align: right; color: #EEE; }}
+    .int-table th {{ background-color: #252627; color: #FFF; padding: 12px 8px; text-align: right; border-bottom: 2px solid #555; }}
     .int-table th:first-child {{ text-align: left; }}
-    .int-table td {{ padding: 12px 10px; border-bottom: 1px solid #2D2E30; }}
-    .int-table td:first-child {{ text-align: left; font-weight: 700; color: {THEME_ACCENT}; }}
-    
-    .row-total {{ background-color: #2A2B2D; font-weight: 800; border-top: 2px solid {THEME_BORDER}; }}
-    .row-cash {{ background-color: {THEME_BG}; font-style: italic; color: {THEME_SUB}; }}
-
-    /* Streamlit UI 요소 오버라이딩 (탭, 버튼 등) */
-    .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
-    .stTabs [data-baseweb="tab"] {{
-        background-color: {THEME_CARD};
-        border-radius: 8px;
-        color: {THEME_SUB};
-        padding: 4px 16px;
-        border: 1px solid {THEME_BORDER};
-    }}
-    .stTabs [aria-selected="true"] {{
-        background-color: #3C4043 !important;
-        color: {THEME_ACCENT} !important;
-        border-color: {THEME_ACCENT} !important;
-    }}
-    .stButton > button {{
-        background-color: {THEME_CARD};
-        color: {THEME_ACCENT};
-        border: 1px solid {THEME_BORDER};
-        border-radius: 8px;
-    }}
-    .stButton > button:hover {{
-        background-color: #303134;
-        border-color: {THEME_ACCENT};
-    }}
-    
-    /* 입력 폼 스타일 */
-    [data-testid="stForm"] {{ background-color: {THEME_CARD}; border: 1px solid {THEME_BORDER}; border-radius: 16px; padding: 20px; }}
+    .int-table td {{ padding: 10px 8px; border-bottom: 1px solid #444; }}
+    .int-table td:first-child {{ text-align: left; font-weight: bold; color: #FFF; }}
+    .row-total {{ background-color: #333; font-weight: bold; border-top: 2px solid #666; }}
+    .row-cash {{ background-color: #1A1A1A; font-style: italic; color: #AAA; }}
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------------------------------------------------------
-# [2] 상수 및 데이터 정의 (순서 수정 완료)
-# -------------------------------------------------------------------
-# 섹터 매핑
+# 섹터 정의
 SECTOR_MAP = {
-    'GOOGL': '테크', 'NVDA': '테크', 'AMD': '테크', 'TSM': '테크', 'MSFT': '테크', 'AAPL': '테크', 'AMZN': '테크', 'TSLA': '테크', 'AVGO': '테크', 'SOXL': '테크',
-    'O': '배당', 'JEPI': '배당', 'JEPQ': '배당', 'SCHD': '배당', 'MAIN': '배당', 'KO': '배당',
+    'NVDA': '테크', 'AMD': '테크', 'TSM': '테크', 'AVGO': '테크', 'SOXL': '테크', 'GOOGL': '테크', 'MSFT': '테크', 'AAPL': '테크', 'AMZN': '테크', 'TSLA': '테크',
+    'O': '배당', 'KO': '배당', 'SCHD': '배당', 'JEPQ': '배당', 'JEPI': '배당', 'MAIN': '배당',
     'PLD': '리츠', 'AMT': '리츠'
 }
 
-# ★★★ 중요: 화면에 표시될 순서 (리스트 순서대로 출력됨) ★★★
+# 정렬 순서 (커스텀)
 SECTOR_ORDER_LIST = {
     '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO'], 
-    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'], # 구글 1순위 적용
+    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'],
     '리츠': ['PLD', 'AMT'],
-    '기타': [] # 나머지 종목 자동 배정
+    '기타': [] 
 }
-
-# 통합 테이블 정렬 순서 (Total을 제외한 종목들)
 SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM']
 
 # -------------------------------------------------------------------
-# [3] 유틸리티 & 데이터 로드
+# [2] 데이터 로드 및 유틸리티
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -194,7 +141,7 @@ def get_realtime_rate():
     return 1450.0
 
 # -------------------------------------------------------------------
-# [4] 엔진: 달러 저수지 & 포트폴리오 계산
+# [3] 달러 저수지 엔진 (Logic)
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money):
     df_money['Source'] = 'Money'
@@ -259,7 +206,6 @@ def process_timeline(df_trade, df_money):
                 
             elif 'sell' in t_type or '매도' in t_type:
                 current_balance += amount
-                # 매도 시점의 저수지 평단으로 환산한 실현가치
                 sell_val_krw = amount * current_avg_rate 
                 
                 if portfolio[ticker]['qty'] > 0:
@@ -275,7 +221,7 @@ def process_timeline(df_trade, df_money):
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Sync Logic
+# [4] Sync Logic
 # -------------------------------------------------------------------
 def sync_api_data(sheet_instance, df_trade, df_money):
     ws_trade = sheet_instance.worksheet("Trade_Log")
@@ -316,7 +262,6 @@ def sync_api_data(sheet_instance, df_trade, df_money):
     # Recalc & Update
     u_trade, u_money, _, _, _ = process_timeline(df_trade, df_money)
     
-    # 덮어쓰기 (빈칸 채운 데이터 반영)
     ws_trade.update([u_trade.columns.values.tolist()] + u_trade.astype(str).values.tolist())
     ws_money.update([u_money.columns.values.tolist()] + u_money.astype(str).values.tolist())
     
@@ -326,7 +271,7 @@ def sync_api_data(sheet_instance, df_trade, df_money):
     st.rerun()
 
 # -------------------------------------------------------------------
-# [6] Main App
+# [5] 메인 앱
 # -------------------------------------------------------------------
 def main():
     try:
@@ -335,11 +280,9 @@ def main():
         st.error("DB 연결 실패.")
         st.stop()
         
-    # 엔진 가동
     u_trade, u_money, cur_bal, cur_rate, portfolio = process_timeline(df_trade, df_money)
     cur_real_rate = get_realtime_rate()
     
-    # 현재가 조회 (API)
     tickers = list(portfolio.keys())
     prices = {}
     if tickers:
@@ -347,7 +290,7 @@ def main():
             for t in tickers:
                 prices[t] = kis.get_current_price(t)
     
-    # 총 자산 및 지표 계산
+    # 지표 계산
     total_stock_val_krw = 0.0
     total_input_principal = df_money[df_money['Type'] == 'KRW_to_USD']['KRW_Amount'].apply(safe_float).sum()
     
@@ -374,7 +317,7 @@ def main():
     status = "🟢 Live" if (23 <= now.hour or now.hour < 6) else "🔴 Closed"
     with c1:
         st.title("🚀 Investment Command Center")
-        st.caption(f"{status} | {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        st.caption(f"{status} | Last Update: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     with c2:
         if st.button("🔄 API Sync"):
             sync_api_data(sheet_instance, u_trade, u_money)
@@ -404,53 +347,37 @@ def main():
     """
     st.markdown(kpi_html, unsafe_allow_html=True)
     
-    # 탭 순서 변경 (대시보드 -> 통합상세 -> 통합로그 -> 입력매니저)
+    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] 대시보드 (Cards)
+    # [Tab 1] 대시보드 (카드)
     with tab1:
         st.write("### 💳 Portfolio Status")
-        
-        # 섹터 순서대로 표시 (SECTOR_ORDER_LIST 기준)
-        display_sectors = ['배당', '테크', '리츠', '기타']
-        
-        for sec in display_sectors:
-            # 1. 해당 섹터의 종목 리스트 가져오기 (정해진 순서)
+        for sec in ['배당', '테크', '리츠', '기타']:
             target_list = SECTOR_ORDER_LIST.get(sec, [])
-            
-            # 2. '기타' 섹터인 경우, 명시되지 않은 보유 종목 찾기
             if sec == '기타':
                 all_defined = [t for lst in SECTOR_ORDER_LIST.values() for t in lst]
                 target_list = [t for t in portfolio.keys() if t not in all_defined and portfolio[t]['qty'] > 0]
             
-            # 3. 실제 보유중인 종목만 필터링 (순서 유지)
             valid_tickers = [t for t in target_list if t in portfolio and portfolio[t]['qty'] > 0]
-            
             if not valid_tickers: continue
             
             st.caption(f"**{sec}** Sector")
             cols = st.columns(4)
-            idx = 0
-            
-            for tk in valid_tickers:
+            for idx, tk in enumerate(valid_tickers):
                 data = portfolio[tk]
                 qty = data['qty']
                 cur_p = prices.get(tk, 0)
-                
-                # 계산 (KRW 중심)
                 val_krw = qty * cur_p * cur_real_rate
                 invested_krw = data['invested_krw']
                 div_krw = data['accum_div_usd'] * cur_real_rate
                 
-                # 총 손익 (평가 + 실현 + 배당)
                 total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
                 total_ret = (total_pl_tk / invested_krw * 100) if invested_krw > 0 else 0
                 
-                # 안전마진
                 bep_rate_tk = (invested_krw - data['realized_krw'] - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
                 margin_tk = cur_real_rate - bep_rate_tk
                 
-                # Style
                 is_plus = total_pl_tk >= 0
                 color_cls = "card-up" if is_plus else "card-down"
                 txt_cls = "txt-red" if is_plus else "txt-blue"
@@ -484,23 +411,10 @@ def main():
                     st.markdown(html, unsafe_allow_html=True)
                 idx += 1
 
-    # [Tab 2] Integrated Table
+    # [Tab 2] Integrated Table (Safe HTML)
     with tab2:
-        table_html = """
-        <table class="int-table">
-            <thead>
-                <tr>
-                    <th>종목</th>
-                    <th>평가액 (₩)</th>
-                    <th>평가손익</th>
-                    <th>환손익</th>
-                    <th>실현+배당</th>
-                    <th>총 손익 (Total)</th>
-                    <th>안전마진</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
+        # Table Header
+        header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
         
         all_keys = list(portfolio.keys())
         def sort_key(tk):
@@ -509,6 +423,7 @@ def main():
         sorted_tickers = sorted(all_keys, key=sort_key)
         
         sum_eval_krw = 0; sum_eval_pl = 0; sum_realized = 0; sum_total_pl = 0
+        rows_html = ""
         
         for tk in sorted_tickers:
             if tk == 'Cash': continue
@@ -516,7 +431,6 @@ def main():
             qty = data['qty']
             cur_p = prices.get(tk, 0)
             
-            # 보유량이 0이어도 실현손익/배당 이력이 있으면 표시
             if qty == 0 and data['realized_krw'] == 0 and data['accum_div_usd'] == 0:
                 continue
 
@@ -540,37 +454,18 @@ def main():
             
             margin_str = f"{margin_tk:+.1f}" if qty > 0 else "-"
             
-            table_html += f"""
-            <tr>
-                <td>{tk}</td>
-                <td>{eval_krw:,.0f}</td>
-                <td class='{cls_pl}'>{unrealized_pl:,.0f}</td>
-                <td>-</td>
-                <td>{realized_total:,.0f}</td>
-                <td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td>
-                <td>{margin_str}</td>
-            </tr>
-            """
+            # One-line String to prevent Markdown parsing error
+            rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{cls_pl}'>{unrealized_pl:,.0f}</td><td>-</td><td>{realized_total:,.0f}</td><td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td><td>{margin_str}</td></tr>"
             
-        # Cash & Total
         cash_krw = cur_bal * cur_real_rate
         final_pl_calc = (sum_eval_krw + cash_krw) - total_input_principal
         cls_fin = "txt-red" if final_pl_calc >= 0 else "txt-blue"
         
-        table_html += f"<tr class='row-cash'><td>Cash (USD)</td><td>{cash_krw:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
-        table_html += f"""
-        <tr class='row-total'>
-            <td>TOTAL</td>
-            <td>{(sum_eval_krw + cash_krw):,.0f}</td>
-            <td>{sum_eval_pl:,.0f}</td>
-            <td>-</td>
-            <td>{sum_realized:,.0f}</td>
-            <td class='{cls_fin}'>{final_pl_calc:,.0f}</td>
-            <td>{safety_margin:+.1f}</td>
-        </tr>
-        </tbody></table>
-        """
-        st.markdown(table_html, unsafe_allow_html=True)
+        cash_row = f"<tr class='row-cash'><td>Cash (USD)</td><td>{cash_krw:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
+        total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_krw):,.0f}</td><td>{sum_eval_pl:,.0f}</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{cls_fin}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
+        
+        full_table = header + rows_html + cash_row + total_row + "</tbody></table>"
+        st.markdown(full_table, unsafe_allow_html=True)
 
     # [Tab 3] Integrated Log
     with tab3:
