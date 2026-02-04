@@ -12,156 +12,88 @@ import KIS_API_Manager as kis
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
-# [색상 팔레트 정의]
-# 1. 배경색 (User Request)
-THEME_BG = "#131314"        # 앱 전체 배경 (제미나이 다크)
-THEME_CARD = "#18181A"      # 카드/컨테이너 배경 (전체 배경보다 살짝 밝음)
-THEME_BORDER = "#444746"    # 테두리 (은은한 회색)
-THEME_TEXT = "#E3E3E3"      # 기본 텍스트 (눈이 편안한 흰색)
-THEME_SUB = "#C4C7C5"       # 보조 텍스트
+# [색상 팔레트]
+THEME_BG = "#131314"
+THEME_CARD = "#18181A"
+THEME_BORDER = "#444746"
+THEME_TEXT = "#E3E3E3"
+THEME_SUB = "#C4C7C5"
 
-# 2. 상태 색상 (Rollback to Vivid Colors)
-COLOR_RED = "#FF5252"       # 수익 (선명한 빨강)
-COLOR_BLUE = "#448AFF"      # 손실 (선명한 파랑)
-COLOR_BG_RED = "rgba(255, 82, 82, 0.15)"    # 수익 배경 (투명도)
-COLOR_BG_BLUE = "rgba(68, 138, 255, 0.15)"  # 손실 배경 (투명도)
+COLOR_RED = "#FF5252"
+COLOR_BLUE = "#448AFF"
+COLOR_BG_RED = "rgba(255, 82, 82, 0.15)"
+COLOR_BG_BLUE = "rgba(68, 138, 255, 0.15)"
 
 st.markdown(f"""
 <style>
-    /* 1. 전체 배경화면 고정 (필수) */
-    .stApp {{
-        background-color: {THEME_BG} !important;
-        color: {THEME_TEXT} !important;
-    }}
-
-    /* 2. 헤더/메뉴 숨김 (깔끔하게) */
+    .stApp {{ background-color: {THEME_BG} !important; color: {THEME_TEXT} !important; }}
     header {{visibility: hidden;}}
     .block-container {{ padding-top: 1.5rem; }}
     
-    /* 3. KPI Grid Style */
-    .kpi-container {{
-        display: grid;
-        grid-template-columns: 2fr 1.5fr 1.5fr;
-        gap: 16px;
-        margin-bottom: 24px;
-    }}
-    .kpi-card {{
-        background-color: {THEME_CARD};
-        padding: 24px;
-        border-radius: 16px;
-        border: 1px solid {THEME_BORDER};
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-    }}
+    /* KPI */
+    .kpi-container {{ display: grid; grid-template-columns: 2fr 1.5fr 1.5fr; gap: 16px; margin-bottom: 24px; }}
+    .kpi-card {{ background-color: {THEME_CARD}; padding: 24px; border-radius: 16px; border: 1px solid {THEME_BORDER}; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }}
     .kpi-title {{ font-size: 0.95rem; color: {THEME_SUB}; margin-bottom: 8px; font-weight: 500; }}
     .kpi-main {{ font-size: 2.2rem; font-weight: 800; color: {THEME_TEXT}; letter-spacing: -0.5px; }}
     .kpi-sub {{ font-size: 1.1rem; margin-top: 8px; font-weight: 600; color: {THEME_SUB}; }}
     
-    /* 4. Color Classes */
+    /* Utilities */
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
     .txt-orange {{ color: #FF9800 !important; }}
     .bg-red {{ background-color: {COLOR_BG_RED} !important; }}
     .bg-blue {{ background-color: {COLOR_BG_BLUE} !important; }}
     
-    /* 5. Stock Card Style */
-    .stock-card {{
-        background-color: {THEME_CARD};
-        border-radius: 16px;
-        padding: 20px;
-        margin-bottom: 16px;
-        border: 1px solid {THEME_BORDER};
-        border-left: 6px solid #555;
-        transition: transform 0.2s, box-shadow 0.2s;
-    }}
-    .stock-card:hover {{
-        transform: translateY(-4px);
-        box-shadow: 0 6px 12px rgba(0,0,0,0.4);
-    }}
+    /* Cards */
+    .stock-card {{ background-color: {THEME_CARD}; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid {THEME_BORDER}; border-left: 6px solid #555; transition: transform 0.2s, box-shadow 0.2s; }}
+    .stock-card:hover {{ transform: translateY(-4px); box-shadow: 0 6px 12px rgba(0,0,0,0.4); }}
     .card-up {{ border-left-color: {COLOR_RED} !important; }}
     .card-down {{ border-left-color: {COLOR_BLUE} !important; }}
-    
     .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }}
     .card-ticker {{ font-size: 1.4rem; font-weight: 900; color: {THEME_TEXT}; }}
     .card-price {{ font-size: 1.1rem; font-weight: 500; color: {THEME_SUB}; }}
-    
     .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: {THEME_TEXT}; text-align: right; margin-bottom: 4px; letter-spacing: -0.5px; }}
     .card-sub-box {{ text-align: right; font-size: 1.0rem; font-weight: 600; }}
-    .pl-amt {{ font-size: 1.1rem; font-weight: 700; margin-right: 6px; }}
-    .pl-pct {{ font-size: 0.95rem; font-weight: 500; opacity: 0.9; }}
     
-    /* 6. Detail Table (Card Expander) */
+    /* Detail Table */
     .detail-table {{ width: 100%; font-size: 0.9rem; color: {THEME_SUB}; margin-top: 16px; border-top: 1px solid {THEME_BORDER}; }}
     .detail-table td {{ padding: 8px 0; border-bottom: 1px solid #333; }}
     .detail-table tr:last-child td {{ border-bottom: none; }}
     .text-right {{ text-align: right; }}
     
-    /* 7. Integrated Table (HTML) */
+    /* Integrated Table */
     .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; text-align: right; color: {THEME_TEXT}; }}
-    .int-table th {{ 
-        background-color: #252627; 
-        color: {THEME_SUB}; 
-        padding: 14px 10px; 
-        text-align: right; 
-        border-bottom: 1px solid {THEME_BORDER}; 
-        font-weight: 600;
-    }}
+    .int-table th {{ background-color: #252627; color: {THEME_SUB}; padding: 14px 10px; text-align: right; border-bottom: 1px solid {THEME_BORDER}; font-weight: 600; }}
     .int-table th:first-child {{ text-align: left; }}
     .int-table td {{ padding: 12px 10px; border-bottom: 1px solid #2D2E30; }}
     .int-table td:first-child {{ text-align: left; font-weight: 700; color: #A8C7FA; }}
-    
     .row-total {{ background-color: #2A2B2D; font-weight: 800; border-top: 2px solid {THEME_BORDER}; }}
     .row-cash {{ background-color: {THEME_BG}; font-style: italic; color: {THEME_SUB}; }}
 
-    /* UI Elements Override */
+    /* Streamlit Overrides */
     .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
-    .stTabs [data-baseweb="tab"] {{
-        background-color: {THEME_CARD};
-        border-radius: 8px;
-        color: {THEME_SUB};
-        padding: 6px 16px;
-        border: 1px solid {THEME_BORDER};
-    }}
-    .stTabs [aria-selected="true"] {{
-        background-color: #3C4043 !important;
-        color: #A8C7FA !important;
-        border-color: #A8C7FA !important;
-    }}
-    .stButton > button {{
-        background-color: {THEME_CARD};
-        color: #A8C7FA;
-        border: 1px solid {THEME_BORDER};
-        border-radius: 8px;
-    }}
-    .stButton > button:hover {{
-        background-color: #303134;
-        border-color: #A8C7FA;
-    }}
-    
-    /* Input Form */
+    .stTabs [data-baseweb="tab"] {{ background-color: {THEME_CARD}; border-radius: 8px; color: {THEME_SUB}; padding: 6px 16px; border: 1px solid {THEME_BORDER}; }}
+    .stTabs [aria-selected="true"] {{ background-color: #3C4043 !important; color: #A8C7FA !important; border-color: #A8C7FA !important; }}
+    .stButton > button {{ background-color: {THEME_CARD}; color: #A8C7FA; border: 1px solid {THEME_BORDER}; border-radius: 8px; }}
+    .stButton > button:hover {{ background-color: #303134; border-color: #A8C7FA; }}
     [data-testid="stForm"] {{ background-color: {THEME_CARD}; border: 1px solid {THEME_BORDER}; border-radius: 16px; padding: 20px; }}
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# [2] 상수 및 데이터 정의 (순서 수정 완료)
+# [2] 상수 및 데이터 정의
 # -------------------------------------------------------------------
-# 섹터 매핑
 SECTOR_MAP = {
     'GOOGL': '테크', 'NVDA': '테크', 'AMD': '테크', 'TSM': '테크', 'MSFT': '테크', 'AAPL': '테크', 'AMZN': '테크', 'TSLA': '테크', 'AVGO': '테크', 'SOXL': '테크',
     'O': '배당', 'JEPI': '배당', 'JEPQ': '배당', 'SCHD': '배당', 'MAIN': '배당', 'KO': '배당',
     'PLD': '리츠', 'AMT': '리츠'
 }
-
-# ★★★ 중요: 화면에 표시될 순서 (리스트 순서대로 출력됨) ★★★
 SECTOR_ORDER_LIST = {
     '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO'], 
-    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'], # 구글 1순위 적용
+    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'],
     '리츠': ['PLD', 'AMT'],
-    '기타': [] # 나머지 종목 자동 배정
+    '기타': [] 
 }
-
-# 통합 테이블 정렬 순서 (Total을 제외한 종목들)
 SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM']
 
 # -------------------------------------------------------------------
@@ -185,22 +117,20 @@ def load_data():
     df_money = pd.DataFrame(sh.worksheet("Money_Log").get_all_records())
     df_trade = pd.DataFrame(sh.worksheet("Trade_Log").get_all_records())
     
-    # 공백 제거
     df_money.columns = df_money.columns.str.strip()
     df_trade.columns = df_trade.columns.str.strip()
 
-    # [추가됨] 숫자 컬럼 강제 형변환 (오류 방지)
-    cols_to_numeric_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
-    for col in cols_to_numeric_money:
-        if col in df_money.columns:
-            # 쉼표(,) 제거 후 숫자로 변환, 실패시 0으로 채움
-            df_money[col] = pd.to_numeric(df_money[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-
-    cols_to_numeric_trade = ['Qty', 'Price_USD', 'Ex_Avg_Rate']
-    for col in cols_to_numeric_trade:
-        if col in df_trade.columns:
-            df_trade[col] = pd.to_numeric(df_trade[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    # [Fix] ArrowTypeError 방지를 위한 강제 숫자 변환
+    cols_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
+    for c in cols_money:
+        if c in df_money.columns:
+            df_money[c] = pd.to_numeric(df_money[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             
+    cols_trade = ['Qty', 'Price_USD', 'Ex_Avg_Rate']
+    for c in cols_trade:
+        if c in df_trade.columns:
+            df_trade[c] = pd.to_numeric(df_trade[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
     return df_trade, df_money, sh
 
 def get_realtime_rate():
@@ -209,8 +139,7 @@ def get_realtime_rate():
         data = ticker.history(period="1d")
         if not data.empty:
             return data['Close'].iloc[-1]
-    except:
-        pass
+    except: pass
     return 1450.0
 
 # -------------------------------------------------------------------
@@ -229,6 +158,9 @@ def process_timeline(df_trade, df_money):
     
     current_balance = 0.0
     current_avg_rate = 0.0
+    
+    # Portfolio Dictionary
+    # 구조: {tk: {'qty':..., 'invested_krw':..., 'invested_usd':..., 'realized_krw':..., 'accum_div_usd':...}}
     portfolio = {} 
     
     for idx, row in timeline.iterrows():
@@ -245,7 +177,8 @@ def process_timeline(df_trade, df_money):
             # 배당 누적
             if 'dividend' in t_type or '배당' in t_type:
                 if ticker != 'Cash':
-                    if ticker not in portfolio: portfolio[ticker] = {'qty':0, 'invested_krw':0, 'realized_krw':0, 'accum_div_usd':0}
+                    if ticker not in portfolio: 
+                        portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
             
             # 저수지 평단/잔고
@@ -265,7 +198,8 @@ def process_timeline(df_trade, df_money):
             amount = qty * price
             ticker = str(row.get('Ticker', '')).strip()
             
-            if ticker not in portfolio: portfolio[ticker] = {'qty':0, 'invested_krw':0, 'realized_krw':0, 'accum_div_usd':0}
+            if ticker not in portfolio: 
+                portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0}
             
             if 'buy' in t_type or '매수' in t_type:
                 current_balance -= amount
@@ -276,21 +210,27 @@ def process_timeline(df_trade, df_money):
                 
                 portfolio[ticker]['qty'] += qty
                 portfolio[ticker]['invested_krw'] += (amount * ex_rate)
+                portfolio[ticker]['invested_usd'] += amount # [NEW] 매수 달러 원금 추적
                 
             elif 'sell' in t_type or '매도' in t_type:
                 current_balance += amount
-                # 매도 시점의 저수지 평단으로 환산한 실현가치
                 sell_val_krw = amount * current_avg_rate 
                 
                 if portfolio[ticker]['qty'] > 0:
-                    avg_unit_invest = portfolio[ticker]['invested_krw'] / portfolio[ticker]['qty']
-                    cost_krw = qty * avg_unit_invest
+                    # KRW 평단 차감
+                    avg_unit_invest_krw = portfolio[ticker]['invested_krw'] / portfolio[ticker]['qty']
+                    cost_krw = qty * avg_unit_invest_krw
+                    
+                    # USD 평단 차감 [NEW]
+                    avg_unit_invest_usd = portfolio[ticker]['invested_usd'] / portfolio[ticker]['qty']
+                    cost_usd = qty * avg_unit_invest_usd
                     
                     pl_krw = sell_val_krw - cost_krw
                     portfolio[ticker]['realized_krw'] += pl_krw
                     
                     portfolio[ticker]['qty'] -= qty
                     portfolio[ticker]['invested_krw'] -= cost_krw
+                    portfolio[ticker]['invested_usd'] -= cost_usd # [NEW]
 
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
@@ -324,7 +264,6 @@ def sync_api_data(sheet_instance, df_trade, df_money):
             price = float(item['ft_ccld_unpr3'])
             side = "Buy" if item['sll_buy_dvsn_cd'] == '02' else "Sell"
             if f"{dt}_{tk}_{float(qty)}" in keys: continue
-            
             new_rows.append([dt, next_order_id, tk, item['prdt_name'], side, qty, price, "", "API_Auto"])
             next_order_id += 1
             
@@ -335,7 +274,6 @@ def sync_api_data(sheet_instance, df_trade, df_money):
             
     # Recalc & Update
     u_trade, u_money, _, _, _ = process_timeline(df_trade, df_money)
-    
     ws_trade.update([u_trade.columns.values.tolist()] + u_trade.astype(str).values.tolist())
     ws_money.update([u_money.columns.values.tolist()] + u_money.astype(str).values.tolist())
     
@@ -364,7 +302,6 @@ def main():
             for t in tickers:
                 prices[t] = kis.get_current_price(t)
     
-    # 지표 계산
     total_stock_val_krw = 0.0
     total_input_principal = df_money[df_money['Type'] == 'KRW_to_USD']['KRW_Amount'].apply(safe_float).sum()
     
@@ -391,7 +328,7 @@ def main():
     status = "🟢 Live" if (23 <= now.hour or now.hour < 6) else "🔴 Closed"
     with c1:
         st.title("🚀 Investment Command Center")
-        st.caption(f"{status} | Last Update: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        st.caption(f"{status} | {now.strftime('%Y-%m-%d %H:%M:%S')}")
     with c2:
         if st.button("🔄 API Sync"):
             sync_api_data(sheet_instance, u_trade, u_money)
@@ -424,7 +361,7 @@ def main():
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] 대시보드 (카드)
+    # [Tab 1] Cards
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -485,7 +422,7 @@ def main():
                     st.markdown(html, unsafe_allow_html=True)
                 idx += 1
 
-    # [Tab 2] Integrated Table (Safe HTML)
+    # [Tab 2] Integrated Table (FX Split Logic Added)
     with tab2:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
         
@@ -509,45 +446,85 @@ def main():
 
             eval_krw = qty * cur_p * cur_real_rate
             invested_krw = data['invested_krw']
+            invested_usd = data['invested_usd']
             div_krw = data['accum_div_usd'] * cur_real_rate
             
+            # --- [핵심 로직 변경] 환손익 분리 ---
+            # 1. Total 손익 (절대 기준)
             total_pl = eval_krw - invested_krw + data['realized_krw'] + div_krw
-            unrealized_pl = eval_krw - invested_krw
+            
+            # 2. 미실현 손익 분해 (평가손익 vs 환손익)
+            # 조건: 보유 수량이 있을 때만 계산
+            if qty > 0:
+                # 내 평단 환율 (해당 종목 매수 시점들의 가중평균 환율)
+                my_avg_rate_tk = invested_krw / invested_usd if invested_usd > 0 else 0
+                
+                # A. 환손익 (Currency Gain) = 투자원금($) * (현재환율 - 내평단환율)
+                fx_profit = invested_usd * (cur_real_rate - my_avg_rate_tk)
+                
+                # B. 평가손익 (Price Gain) = (현재가($) - 평단가($)) * 수량 * 현재환율
+                # 수식 검증: (Eval_USD - Invested_USD) * Cur_Rate
+                val_usd = qty * cur_p
+                price_profit = (val_usd - invested_usd) * cur_real_rate
+                
+                # (참고: fx_profit + price_profit = eval_krw - invested_krw = 총 미실현손익. 정확함.)
+            else:
+                fx_profit = 0
+                price_profit = 0
+
             realized_total = data['realized_krw'] + div_krw
             
             bep_tk = (invested_krw - realized_total) / (qty * cur_p) if (qty*cur_p) > 0 else 0
             margin_tk = cur_real_rate - bep_tk if qty > 0 else 0
             
-            cls_pl = "txt-red" if unrealized_pl >= 0 else "txt-blue"
+            # Styles
+            cls_price = "txt-red" if price_profit >= 0 else "txt-blue"
+            cls_fx = "txt-red" if fx_profit >= 0 else "txt-blue"
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
             bg_cls = "bg-red" if total_pl >= 0 else "bg-blue"
             
-            sum_eval_krw += eval_krw; sum_eval_pl += unrealized_pl
-            sum_realized += realized_total; sum_total_pl += total_pl
+            sum_eval_krw += eval_krw
+            sum_eval_pl += price_profit # 평가손익 합계엔 '순수주가손익'만? 아니면 환손익도? -> 분리해서 보여주므로 여기선 주가손익만 합산
+            # Total Row Logic needs care. Let's create columns properly.
+            
+            sum_realized += realized_total
+            sum_total_pl += total_pl
             
             margin_str = f"{margin_tk:+.1f}" if qty > 0 else "-"
             
-            # One-line String to prevent Markdown parsing error
-            rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{cls_pl}'>{unrealized_pl:,.0f}</td><td>-</td><td>{realized_total:,.0f}</td><td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td><td>{margin_str}</td></tr>"
+            rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{cls_price}'>{price_profit:,.0f}</td><td class='{cls_fx}'>{fx_profit:,.0f}</td><td>{realized_total:,.0f}</td><td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td><td>{margin_str}</td></tr>"
             
         cash_krw = cur_bal * cur_real_rate
-        final_pl_calc = (sum_eval_krw + cash_krw) - total_input_principal
+        final_pl_calc = (sum_eval_krw + cash_krw) - total_input_principal # Total Asset - Total Input
+        # Note: In the Total Row, '평가손익' column usually means Total Unrealized.
+        # But since we split columns, let's keep it clean.
+        
+        # 합계 행 구성
+        # Cash 행
+        cash_row = f"<tr class='row-cash'><td>Cash (USD)</td><td>{cash_krw:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
+        
+        # Total 행
+        # Total의 '평가손익'과 '환손익'은 개별 종목 단순 합산보다는, 전체 자산 관점에서 보는게 맞음.
+        # 하지만 표의 정합성을 위해 열 별 합계를 표시.
+        # 환손익 합계 계산 필요 (루프에서 안 했음 -> 위에서 sum_eval_pl은 주가손익만 더함)
+        # 다시 루프 돌긴 비효율적이니, Total Row의 중간 값들은 '-' 처리하거나 전체 PL만 강조하는 게 깔끔함.
+        # PM님 요청: "총 손익 (Total)"이 중요함.
+        
         cls_fin = "txt-red" if final_pl_calc >= 0 else "txt-blue"
         
-        cash_row = f"<tr class='row-cash'><td>Cash (USD)</td><td>{cash_krw:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
-        total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_krw):,.0f}</td><td>{sum_eval_pl:,.0f}</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{cls_fin}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
+        total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_krw):,.0f}</td><td>-</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{cls_fin}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
         
         full_table = header + rows_html + cash_row + total_row + "</tbody></table>"
         st.markdown(full_table, unsafe_allow_html=True)
 
-    # [Tab 3] Integrated Log
+    # [Tab 3] Log
     with tab3:
         merged_log = pd.concat([u_money, u_trade], ignore_index=True)
         merged_log['Order_ID'] = pd.to_numeric(merged_log['Order_ID']).fillna(0)
         merged_log = merged_log.sort_values(['Order_ID', 'Date'], ascending=[False, False])
         st.dataframe(merged_log.fillna(''), use_container_width=True)
 
-    # [Tab 4] Input Manager
+    # [Tab 4] Input
     with tab4:
         st.subheader("📝 환전 & 배당 입력")
         with st.form("input_form"):
