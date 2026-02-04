@@ -185,8 +185,22 @@ def load_data():
     df_money = pd.DataFrame(sh.worksheet("Money_Log").get_all_records())
     df_trade = pd.DataFrame(sh.worksheet("Trade_Log").get_all_records())
     
+    # 공백 제거
     df_money.columns = df_money.columns.str.strip()
     df_trade.columns = df_trade.columns.str.strip()
+
+    # [추가됨] 숫자 컬럼 강제 형변환 (오류 방지)
+    cols_to_numeric_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
+    for col in cols_to_numeric_money:
+        if col in df_money.columns:
+            # 쉼표(,) 제거 후 숫자로 변환, 실패시 0으로 채움
+            df_money[col] = pd.to_numeric(df_money[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
+    cols_to_numeric_trade = ['Qty', 'Price_USD', 'Ex_Avg_Rate']
+    for col in cols_to_numeric_trade:
+        if col in df_trade.columns:
+            df_trade[col] = pd.to_numeric(df_trade[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            
     return df_trade, df_money, sh
 
 def get_realtime_rate():
