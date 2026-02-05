@@ -241,50 +241,79 @@ def process_timeline(df_trade, df_money):
 # -------------------------------------------------------------------
 # [5] Sync Logic (수정: Date 정렬 반영한 빈칸 채우기)
 # -------------------------------------------------------------------
+# [Dashboard.py 내부의 sync_api_data 함수 수정]
+
 def sync_api_data(sheet_instance, df_trade, df_money):
     ws_trade = sheet_instance.worksheet("Trade_Log")
     
-    # 1. API 데이터 가져오기
+    # [수정 1] Order ID 계산
     max_id = max(pd.to_numeric(df_trade['Order_ID'], errors='coerce').max(), pd.to_numeric(df_money['Order_ID'], errors='coerce').max())
     next_order_id = int(max_id) + 1 if not pd.isna(max_id) else 1
     
-    last_date = pd.to_datetime(df_trade['Date']).max() if not df_trade.empty else datetime(2026,1,1)
-    last_date_str = last_date.strftime("%Y%m%d")
-    end_date_str = datetime.now().strftime("%Y%m%d")
+    # [수정 2] 조회 기간 로직 변경 (안전망 확보)
+    # 기존: DB의 마지막 날짜부터 조회 (누락 위험 있음)
+    # 변경: 무조건 '오늘로부터 30일 전'부터 조회 (누락된 과거 데이터 재수집 보장)
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=30) # 넉넉하게 한 달 전부터 훑기
     
-    with st.spinner(f"API 데이터 수신 중... ({last_date_str} ~)"):
-        res = kis.get_trade_history(last_date_str, end_date_str)
+    start_date_str = start_dt.strftime("%Y%m%d")
+    end_date_str = end_dt.strftime("%Y%m%d")
+    
+    with st.spinner(f"API 데이터 수신 중... (기간: {start_date_str} ~ {end_date_str})"):
+        # KIS_API_Manager의 함수 호출
+        res = kis.get_trade_history(start_date_str, end_date_str)
     
     new_rows = []
+    # 데이터 중복 체크 키 생성 (Date_Ticker_Qty_Price)
+    # 소수점 오차 방지를 위해 Qty는 int, Price는 float 처리 후 문자열 조합
+    existing_keys = set()
+    for _, r in df_trade.iterrows():
+        d = str(r['Date']).strip()
+        t = str(r['Ticker']).strip()
+        q = int(safe_float(r['Qty']))
+        p = float(safe_float(r['Price_USD'])) # Price도 키에 포함하여 정확도 향상
+        existing_keys.add(f"{d}_{t}_{q}_{p:.4f}")
+
     if res and res.get('output1'):
-        keys = set(f"{r['Date']}_{r['Ticker']}_{safe_float(r['Qty'])}" for _, r in df_trade.iterrows())
-        for item in reversed(res['output1']):
+        for item in reversed(res['output1']): # 과거 데이터부터 순서대로
             dt = datetime.strptime(item['dt'], "%Y%m%d").strftime("%Y-%m-%d")
             tk = item['pdno']
             qty = int(item['ccld_qty'])
             price = float(item['ft_ccld_unpr3'])
+            
+            # 매수/매도 구분
+            # 01:매도, 02:매수 (KIS 표준)
             side = "Buy" if item['sll_buy_dvsn_cd'] == '02' else "Sell"
+            prd_name = item['prdt_name']
             
-            if f"{dt}_{tk}_{float(qty)}" in keys: continue
+            # [중복 방지] 키 검사
+            check_key = f"{dt}_{tk}_{qty}_{price:.4f}"
             
-            new_rows.append([dt, next_order_id, tk, item['prdt_name'], side, qty, price, "", "API_Auto"])
+            if check_key in existing_keys:
+                continue
+            
+            # 신규 데이터 추가
+            new_rows.append([dt, next_order_id, tk, prd_name, side, qty, price, "", "API_Auto"])
+            existing_keys.add(check_key) # 방금 추가한 것도 중복 방지 목록에 등록
             next_order_id += 1
             
     if new_rows:
         ws_trade.append_rows(new_rows)
-        # Reload Data
+        # 데이터 다시 로드 및 전처리
         df_trade = pd.DataFrame(ws_trade.get_all_records())
         df_trade.columns = df_trade.columns.str.strip()
-        # 형변환
+        
         for c in ['Qty', 'Price_USD', 'Ex_Avg_Rate']:
             if c in df_trade.columns:
                 df_trade[c] = pd.to_numeric(df_trade[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-    # 2. 빈칸 채우기 (Fill-Forward) - 로직: Date 순서로 시뮬레이션 하면서 빈칸이 보이면 채워넣음
+    # ---------------------------------------------------------
+    # 2. 빈칸 채우기 & 재계산 로직 (기존과 동일)
+    # ---------------------------------------------------------
     df_money['Source'] = 'Money'
     df_trade['Source'] = 'Trade'
     
-    # 타임라인 재구성 (Date 우선 정렬)
+    # 타임라인 재구성 (Date 우선 정렬 -> Order_ID 정렬)
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
     timeline['Date'] = pd.to_datetime(timeline['Date'])
@@ -293,15 +322,10 @@ def sync_api_data(sheet_instance, df_trade, df_money):
     cur_bal = 0.0
     cur_avg = 0.0
     
-    # 업데이트할 데이터 수집
-    money_updates = [] # {row_idx: {col_name: value}}
-    trade_updates = []
-    
+    # 시뮬레이션
     for idx, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
-        original_idx = row.name # concat 전 인덱스가 아님. 다시 매핑 필요.
-        # Order_ID로 원본 행 찾기 전략이 안전함.
         oid = row['Order_ID']
         
         if source == 'Money':
@@ -314,7 +338,7 @@ def sync_api_data(sheet_instance, df_trade, df_money):
                 added_val = 0 if ('dividend' in t_type or '배당' in t_type) else krw
                 cur_avg = (prev_val + added_val) / cur_bal
             
-            # 빈칸이면 채우기
+            # 빈칸 채우기
             if safe_float(row.get('Avg_Rate')) == 0:
                 df_money.loc[df_money['Order_ID'] == oid, 'Avg_Rate'] = cur_avg
             if safe_float(row.get('Balance')) == 0:
@@ -327,29 +351,25 @@ def sync_api_data(sheet_instance, df_trade, df_money):
             
             if 'buy' in t_type or '매수' in t_type:
                 cur_bal -= amount
-                # Ex_Avg_Rate 채우기
                 if safe_float(row.get('Ex_Avg_Rate')) == 0:
                     df_trade.loc[df_trade['Order_ID'] == oid, 'Ex_Avg_Rate'] = cur_avg
             elif 'sell' in t_type or '매도' in t_type:
                 cur_bal += amount
 
     # 3. Google Sheet Bulk Update
-    # gspread의 update 함수로 전체 덮어쓰기 (가장 확실)
-    # 데이터프레임을 리스트로 변환 (헤더 포함)
     ws_money = sheet_instance.worksheet("Money_Log")
-    # 날짜를 다시 문자열로
+    
     if 'Date' in df_trade.columns: df_trade['Date'] = df_trade['Date'].astype(str)
-    # Source 열 제거
     if 'Source' in df_trade.columns: df_trade = df_trade.drop(columns=['Source'])
     if 'Source' in df_money.columns: df_money = df_money.drop(columns=['Source'])
     
     ws_trade.update([df_trade.columns.values.tolist()] + df_trade.astype(str).values.tolist())
     ws_money.update([df_money.columns.values.tolist()] + df_money.astype(str).values.tolist())
     
-    st.toast("동기화 및 재계산 완료")
+    msg = f"✅ {len(new_rows)}건 업데이트 및 재계산 완료" if new_rows else "✅ 최신 상태 (기간 내 변동 없음)"
+    st.toast(msg)
     time.sleep(1)
     st.rerun()
-
 # -------------------------------------------------------------------
 # [6] Main App
 # -------------------------------------------------------------------
