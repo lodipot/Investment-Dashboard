@@ -8,7 +8,7 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 스타일 (Gemini Theme Fixed)
+# [1] 설정 & 스타일 (Input Field Visibility Fix)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
@@ -55,13 +55,7 @@ st.markdown(f"""
     .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: {THEME_TEXT}; text-align: right; margin-bottom: 4px; letter-spacing: -0.5px; }}
     .card-sub-box {{ text-align: right; font-size: 1.0rem; font-weight: 600; }}
     
-    /* Detail Table */
-    .detail-table {{ width: 100%; font-size: 0.9rem; color: {THEME_SUB}; margin-top: 16px; border-top: 1px solid {THEME_BORDER}; }}
-    .detail-table td {{ padding: 8px 0; border-bottom: 1px solid #333; }}
-    .detail-table tr:last-child td {{ border-bottom: none; }}
-    .text-right {{ text-align: right; }}
-    
-    /* Integrated Table */
+    /* Tables */
     .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; text-align: right; color: {THEME_TEXT}; }}
     .int-table th {{ background-color: #252627; color: {THEME_SUB}; padding: 14px 10px; text-align: right; border-bottom: 1px solid {THEME_BORDER}; font-weight: 600; }}
     .int-table th:first-child {{ text-align: left; }}
@@ -74,9 +68,15 @@ st.markdown(f"""
     .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
     .stTabs [data-baseweb="tab"] {{ background-color: {THEME_CARD}; border-radius: 8px; color: {THEME_SUB}; padding: 6px 16px; border: 1px solid {THEME_BORDER}; }}
     .stTabs [aria-selected="true"] {{ background-color: #3C4043 !important; color: #A8C7FA !important; border-color: #A8C7FA !important; }}
-    .stButton > button {{ background-color: {THEME_CARD}; color: #A8C7FA; border: 1px solid {THEME_BORDER}; border-radius: 8px; }}
-    .stButton > button:hover {{ background-color: #303134; border-color: #A8C7FA; }}
-    [data-testid="stForm"] {{ background-color: {THEME_CARD}; border: 1px solid {THEME_BORDER}; border-radius: 16px; padding: 20px; }}
+    
+    /* Input Fields Fix */
+    [data-testid="stForm"] {{ background-color: {THEME_CARD}; border: 1px solid {THEME_BORDER}; border-radius: 16px; padding: 24px; }}
+    .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {{ 
+        color: {THEME_TEXT} !important; 
+        background-color: #252627 !important; 
+        border-color: {THEME_BORDER} !important;
+    }}
+    .stTextInput label, .stNumberInput label, .stSelectbox label, .stRadio label {{ color: {THEME_SUB} !important; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -120,7 +120,6 @@ def load_data():
     df_money.columns = df_money.columns.str.strip()
     df_trade.columns = df_trade.columns.str.strip()
 
-    # [Fix] ArrowTypeError 방지를 위한 강제 숫자 변환
     cols_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
     for c in cols_money:
         if c in df_money.columns:
@@ -143,7 +142,7 @@ def get_realtime_rate():
     return 1450.0
 
 # -------------------------------------------------------------------
-# [4] 엔진: 달러 저수지 & 포트폴리오 계산
+# [4] 엔진: 달러 저수지 & 포트폴리오 계산 (로직 수정: Date 우선 정렬)
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money):
     df_money['Source'] = 'Money'
@@ -152,15 +151,16 @@ def process_timeline(df_trade, df_money):
     if 'Order_ID' not in df_money.columns: df_money['Order_ID'] = 0
     if 'Order_ID' not in df_trade.columns: df_trade['Order_ID'] = 0
     
+    # [핵심 변경] 날짜(Date)를 최우선으로 정렬하고, 같은 날짜 내에서 Order_ID를 따름.
+    # 이를 통해 나중에 API로 들어온 '과거 데이터'(ID는 크지만 Date는 과거)를 올바른 순서로 끼워 넣음.
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
-    timeline = timeline.sort_values(by=['Order_ID', 'Date'])
+    timeline['Date'] = pd.to_datetime(timeline['Date']) # 날짜 형식 변환
+    
+    timeline = timeline.sort_values(by=['Date', 'Order_ID']) # Date 우선 정렬
     
     current_balance = 0.0
     current_avg_rate = 0.0
-    
-    # Portfolio Dictionary
-    # 구조: {tk: {'qty':..., 'invested_krw':..., 'invested_usd':..., 'realized_krw':..., 'accum_div_usd':...}}
     portfolio = {} 
     
     for idx, row in timeline.iterrows():
@@ -172,7 +172,7 @@ def process_timeline(df_trade, df_money):
             usd_amt = safe_float(row.get('USD_Amount'))
             krw_amt = safe_float(row.get('KRW_Amount'))
             ticker = str(row.get('Ticker', '')).strip()
-            if ticker == '' or ticker == '-': ticker = 'Cash'
+            if ticker == '' or ticker == '-' or ticker == 'nan': ticker = 'Cash'
             
             # 배당 누적
             if 'dividend' in t_type or '배당' in t_type:
@@ -187,9 +187,13 @@ def process_timeline(df_trade, df_money):
                 prev_val = (current_balance - usd_amt) * current_avg_rate
                 added_val = 0 if ('dividend' in t_type or '배당' in t_type) else krw_amt
                 current_avg_rate = (prev_val + added_val) / current_balance
-                
-            df_money.loc[df_money['Order_ID'] == row['Order_ID'], 'Avg_Rate'] = current_avg_rate
-            df_money.loc[df_money['Order_ID'] == row['Order_ID'], 'Balance'] = current_balance
+            
+            # 빈칸 채우기 (Date 정렬된 상태에서 메모리상 갱신)
+            # 주의: 여기서 원본 DF의 값을 바꾸려면 인덱스 매칭 필요.
+            # 하지만 화면 표시용으로만 쓸거라면 계산된 값들만 return 하면 됨.
+            # gspread update를 위해서는 Order_ID 기반으로 찾아야 함.
+            
+            # 여기서는 계산된 포트폴리오와 현재 상태만 반환
 
         # --- Trade Log ---
         elif source == 'Trade':
@@ -203,25 +207,25 @@ def process_timeline(df_trade, df_money):
             
             if 'buy' in t_type or '매수' in t_type:
                 current_balance -= amount
-                ex_rate = safe_float(row.get('Ex_Avg_Rate'))
-                if ex_rate == 0: 
-                    ex_rate = current_avg_rate
-                    df_trade.loc[df_trade['Order_ID'] == row['Order_ID'], 'Ex_Avg_Rate'] = ex_rate
+                # 매수 시점의 환율 확정 (DB에 없으면 현재 계산된 평단 사용)
+                ex_rate_db = safe_float(row.get('Ex_Avg_Rate'))
+                rate_to_use = ex_rate_db if ex_rate_db > 0 else current_avg_rate
+                
+                # 빈칸 채우기 로직을 위해 여기서 값을 업데이트 해줄 필요가 있음 (API Sync 함수에서 사용)
+                # 여기서는 '계산'만 수행
                 
                 portfolio[ticker]['qty'] += qty
-                portfolio[ticker]['invested_krw'] += (amount * ex_rate)
-                portfolio[ticker]['invested_usd'] += amount # [NEW] 매수 달러 원금 추적
+                portfolio[ticker]['invested_krw'] += (amount * rate_to_use)
+                portfolio[ticker]['invested_usd'] += amount
                 
             elif 'sell' in t_type or '매도' in t_type:
                 current_balance += amount
                 sell_val_krw = amount * current_avg_rate 
                 
                 if portfolio[ticker]['qty'] > 0:
-                    # KRW 평단 차감
                     avg_unit_invest_krw = portfolio[ticker]['invested_krw'] / portfolio[ticker]['qty']
                     cost_krw = qty * avg_unit_invest_krw
                     
-                    # USD 평단 차감 [NEW]
                     avg_unit_invest_usd = portfolio[ticker]['invested_usd'] / portfolio[ticker]['qty']
                     cost_usd = qty * avg_unit_invest_usd
                     
@@ -230,85 +234,57 @@ def process_timeline(df_trade, df_money):
                     
                     portfolio[ticker]['qty'] -= qty
                     portfolio[ticker]['invested_krw'] -= cost_krw
-                    portfolio[ticker]['invested_usd'] -= cost_usd # [NEW]
+                    portfolio[ticker]['invested_usd'] -= cost_usd
 
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Sync Logic
+# [5] Sync Logic (수정: Date 정렬 반영한 빈칸 채우기)
 # -------------------------------------------------------------------
-# [Dashboard.py 내부의 sync_api_data 함수 수정]
 def sync_api_data(sheet_instance, df_trade, df_money):
     ws_trade = sheet_instance.worksheet("Trade_Log")
     
-    # [수정 1] Order ID 계산
+    # 1. API 데이터 가져오기
     max_id = max(pd.to_numeric(df_trade['Order_ID'], errors='coerce').max(), pd.to_numeric(df_money['Order_ID'], errors='coerce').max())
     next_order_id = int(max_id) + 1 if not pd.isna(max_id) else 1
     
-    # [수정 2] 조회 기간 로직 변경 (안전망 확보)
-    # 기존: DB의 마지막 날짜부터 조회 (누락 위험 있음)
-    # 변경: 무조건 '오늘로부터 30일 전'부터 조회 (누락된 과거 데이터 재수집 보장)
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=30) # 넉넉하게 한 달 전부터 훑기
+    last_date = pd.to_datetime(df_trade['Date']).max() if not df_trade.empty else datetime(2026,1,1)
+    last_date_str = last_date.strftime("%Y%m%d")
+    end_date_str = datetime.now().strftime("%Y%m%d")
     
-    start_date_str = start_dt.strftime("%Y%m%d")
-    end_date_str = end_dt.strftime("%Y%m%d")
-    
-    with st.spinner(f"API 데이터 수신 중... (기간: {start_date_str} ~ {end_date_str})"):
-        # KIS_API_Manager의 함수 호출
-        res = kis.get_trade_history(start_date_str, end_date_str)
+    with st.spinner(f"API 데이터 수신 중... ({last_date_str} ~)"):
+        res = kis.get_trade_history(last_date_str, end_date_str)
     
     new_rows = []
-    # 데이터 중복 체크 키 생성 (Date_Ticker_Qty_Price)
-    # 소수점 오차 방지를 위해 Qty는 int, Price는 float 처리 후 문자열 조합
-    existing_keys = set()
-    for _, r in df_trade.iterrows():
-        d = str(r['Date']).strip()
-        t = str(r['Ticker']).strip()
-        q = int(safe_float(r['Qty']))
-        p = float(safe_float(r['Price_USD'])) # Price도 키에 포함하여 정확도 향상
-        existing_keys.add(f"{d}_{t}_{q}_{p:.4f}")
-
     if res and res.get('output1'):
-        for item in reversed(res['output1']): # 과거 데이터부터 순서대로
+        keys = set(f"{r['Date']}_{r['Ticker']}_{safe_float(r['Qty'])}" for _, r in df_trade.iterrows())
+        for item in reversed(res['output1']):
             dt = datetime.strptime(item['dt'], "%Y%m%d").strftime("%Y-%m-%d")
             tk = item['pdno']
             qty = int(item['ccld_qty'])
             price = float(item['ft_ccld_unpr3'])
-            
-            # 매수/매도 구분
-            # 01:매도, 02:매수 (KIS 표준)
             side = "Buy" if item['sll_buy_dvsn_cd'] == '02' else "Sell"
-            prd_name = item['prdt_name']
             
-            # [중복 방지] 키 검사
-            check_key = f"{dt}_{tk}_{qty}_{price:.4f}"
+            if f"{dt}_{tk}_{float(qty)}" in keys: continue
             
-            if check_key in existing_keys:
-                continue
-            
-            # 신규 데이터 추가
-            new_rows.append([dt, next_order_id, tk, prd_name, side, qty, price, "", "API_Auto"])
-            existing_keys.add(check_key) # 방금 추가한 것도 중복 방지 목록에 등록
+            new_rows.append([dt, next_order_id, tk, item['prdt_name'], side, qty, price, "", "API_Auto"])
             next_order_id += 1
             
     if new_rows:
         ws_trade.append_rows(new_rows)
-        # 데이터 다시 로드 및 전처리
+        # Reload Data
         df_trade = pd.DataFrame(ws_trade.get_all_records())
         df_trade.columns = df_trade.columns.str.strip()
-        
+        # 형변환
         for c in ['Qty', 'Price_USD', 'Ex_Avg_Rate']:
             if c in df_trade.columns:
                 df_trade[c] = pd.to_numeric(df_trade[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-    # ---------------------------------------------------------
-    # 2. 빈칸 채우기 & 재계산 로직 (기존과 동일)
-    # ---------------------------------------------------------
+    # 2. 빈칸 채우기 (Fill-Forward) - 로직: Date 순서로 시뮬레이션 하면서 빈칸이 보이면 채워넣음
     df_money['Source'] = 'Money'
     df_trade['Source'] = 'Trade'
     
-    # 타임라인 재구성 (Date 우선 정렬 -> Order_ID 정렬)
+    # 타임라인 재구성 (Date 우선 정렬)
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
     timeline['Date'] = pd.to_datetime(timeline['Date'])
@@ -317,10 +293,15 @@ def sync_api_data(sheet_instance, df_trade, df_money):
     cur_bal = 0.0
     cur_avg = 0.0
     
-    # 시뮬레이션
+    # 업데이트할 데이터 수집
+    money_updates = [] # {row_idx: {col_name: value}}
+    trade_updates = []
+    
     for idx, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
+        original_idx = row.name # concat 전 인덱스가 아님. 다시 매핑 필요.
+        # Order_ID로 원본 행 찾기 전략이 안전함.
         oid = row['Order_ID']
         
         if source == 'Money':
@@ -333,7 +314,7 @@ def sync_api_data(sheet_instance, df_trade, df_money):
                 added_val = 0 if ('dividend' in t_type or '배당' in t_type) else krw
                 cur_avg = (prev_val + added_val) / cur_bal
             
-            # 빈칸 채우기
+            # 빈칸이면 채우기
             if safe_float(row.get('Avg_Rate')) == 0:
                 df_money.loc[df_money['Order_ID'] == oid, 'Avg_Rate'] = cur_avg
             if safe_float(row.get('Balance')) == 0:
@@ -346,23 +327,26 @@ def sync_api_data(sheet_instance, df_trade, df_money):
             
             if 'buy' in t_type or '매수' in t_type:
                 cur_bal -= amount
+                # Ex_Avg_Rate 채우기
                 if safe_float(row.get('Ex_Avg_Rate')) == 0:
                     df_trade.loc[df_trade['Order_ID'] == oid, 'Ex_Avg_Rate'] = cur_avg
             elif 'sell' in t_type or '매도' in t_type:
                 cur_bal += amount
 
     # 3. Google Sheet Bulk Update
+    # gspread의 update 함수로 전체 덮어쓰기 (가장 확실)
+    # 데이터프레임을 리스트로 변환 (헤더 포함)
     ws_money = sheet_instance.worksheet("Money_Log")
-    
+    # 날짜를 다시 문자열로
     if 'Date' in df_trade.columns: df_trade['Date'] = df_trade['Date'].astype(str)
+    # Source 열 제거
     if 'Source' in df_trade.columns: df_trade = df_trade.drop(columns=['Source'])
     if 'Source' in df_money.columns: df_money = df_money.drop(columns=['Source'])
     
     ws_trade.update([df_trade.columns.values.tolist()] + df_trade.astype(str).values.tolist())
     ws_money.update([df_money.columns.values.tolist()] + df_money.astype(str).values.tolist())
     
-    msg = f"✅ {len(new_rows)}건 업데이트 및 재계산 완료" if new_rows else "✅ 최신 상태 (기간 내 변동 없음)"
-    st.toast(msg)
+    st.toast("동기화 및 재계산 완료")
     time.sleep(1)
     st.rerun()
 
@@ -386,6 +370,7 @@ def main():
             for t in tickers:
                 prices[t] = kis.get_current_price(t)
     
+    # 지표 계산
     total_stock_val_krw = 0.0
     total_input_principal = df_money[df_money['Type'] == 'KRW_to_USD']['KRW_Amount'].apply(safe_float).sum()
     
@@ -506,7 +491,7 @@ def main():
                     st.markdown(html, unsafe_allow_html=True)
                 idx += 1
 
-    # [Tab 2] Integrated Table (FX Split Logic Added)
+    # [Tab 2] Integrated Table
     with tab2:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
         
@@ -533,25 +518,13 @@ def main():
             invested_usd = data['invested_usd']
             div_krw = data['accum_div_usd'] * cur_real_rate
             
-            # --- [핵심 로직 변경] 환손익 분리 ---
-            # 1. Total 손익 (절대 기준)
             total_pl = eval_krw - invested_krw + data['realized_krw'] + div_krw
             
-            # 2. 미실현 손익 분해 (평가손익 vs 환손익)
-            # 조건: 보유 수량이 있을 때만 계산
             if qty > 0:
-                # 내 평단 환율 (해당 종목 매수 시점들의 가중평균 환율)
                 my_avg_rate_tk = invested_krw / invested_usd if invested_usd > 0 else 0
-                
-                # A. 환손익 (Currency Gain) = 투자원금($) * (현재환율 - 내평단환율)
                 fx_profit = invested_usd * (cur_real_rate - my_avg_rate_tk)
-                
-                # B. 평가손익 (Price Gain) = (현재가($) - 평단가($)) * 수량 * 현재환율
-                # 수식 검증: (Eval_USD - Invested_USD) * Cur_Rate
                 val_usd = qty * cur_p
                 price_profit = (val_usd - invested_usd) * cur_real_rate
-                
-                # (참고: fx_profit + price_profit = eval_krw - invested_krw = 총 미실현손익. 정확함.)
             else:
                 fx_profit = 0
                 price_profit = 0
@@ -561,16 +534,13 @@ def main():
             bep_tk = (invested_krw - realized_total) / (qty * cur_p) if (qty*cur_p) > 0 else 0
             margin_tk = cur_real_rate - bep_tk if qty > 0 else 0
             
-            # Styles
             cls_price = "txt-red" if price_profit >= 0 else "txt-blue"
             cls_fx = "txt-red" if fx_profit >= 0 else "txt-blue"
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
             bg_cls = "bg-red" if total_pl >= 0 else "bg-blue"
             
             sum_eval_krw += eval_krw
-            sum_eval_pl += price_profit # 평가손익 합계엔 '순수주가손익'만? 아니면 환손익도? -> 분리해서 보여주므로 여기선 주가손익만 합산
-            # Total Row Logic needs care. Let's create columns properly.
-            
+            sum_eval_pl += price_profit
             sum_realized += realized_total
             sum_total_pl += total_pl
             
@@ -579,23 +549,10 @@ def main():
             rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{cls_price}'>{price_profit:,.0f}</td><td class='{cls_fx}'>{fx_profit:,.0f}</td><td>{realized_total:,.0f}</td><td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td><td>{margin_str}</td></tr>"
             
         cash_krw = cur_bal * cur_real_rate
-        final_pl_calc = (sum_eval_krw + cash_krw) - total_input_principal # Total Asset - Total Input
-        # Note: In the Total Row, '평가손익' column usually means Total Unrealized.
-        # But since we split columns, let's keep it clean.
-        
-        # 합계 행 구성
-        # Cash 행
-        cash_row = f"<tr class='row-cash'><td>Cash (USD)</td><td>{cash_krw:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
-        
-        # Total 행
-        # Total의 '평가손익'과 '환손익'은 개별 종목 단순 합산보다는, 전체 자산 관점에서 보는게 맞음.
-        # 하지만 표의 정합성을 위해 열 별 합계를 표시.
-        # 환손익 합계 계산 필요 (루프에서 안 했음 -> 위에서 sum_eval_pl은 주가손익만 더함)
-        # 다시 루프 돌긴 비효율적이니, Total Row의 중간 값들은 '-' 처리하거나 전체 PL만 강조하는 게 깔끔함.
-        # PM님 요청: "총 손익 (Total)"이 중요함.
-        
+        final_pl_calc = (sum_eval_krw + cash_krw) - total_input_principal
         cls_fin = "txt-red" if final_pl_calc >= 0 else "txt-blue"
         
+        cash_row = f"<tr class='row-cash'><td>Cash (USD)</td><td>{cash_krw:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
         total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_krw):,.0f}</td><td>-</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{cls_fin}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
         
         full_table = header + rows_html + cash_row + total_row + "</tbody></table>"
@@ -605,35 +562,81 @@ def main():
     with tab3:
         merged_log = pd.concat([u_money, u_trade], ignore_index=True)
         merged_log['Order_ID'] = pd.to_numeric(merged_log['Order_ID']).fillna(0)
-        merged_log = merged_log.sort_values(['Order_ID', 'Date'], ascending=[False, False])
+        # 로그는 역순(최신 먼저)으로 보여주는게 일반적이나, 로직 확인을 위해 Date/ID 정순/역순 선택 가능하면 좋음.
+        # 일단 최신순
+        merged_log = merged_log.sort_values(['Date', 'Order_ID'], ascending=[False, False])
         st.dataframe(merged_log.fillna(''), use_container_width=True)
 
-    # [Tab 4] Input
+    # [Tab 4] Input Manager (Renovated)
     with tab4:
-        st.subheader("📝 환전 & 배당 입력")
+        st.subheader("📝 입출금 및 배당 관리")
+        
+        # 1. 모드 선택 (라디오 버튼을 가로로 배치하여 탭처럼 사용)
+        mode = st.radio("입력 유형", ["💰 환전 (입금)", "🏦 배당 (수령)"], horizontal=True, label_visibility="collapsed")
+        
+        st.divider()
+        
         with st.form("input_form"):
-            c1, c2 = st.columns(2)
-            i_type = c1.radio("구분", ["KRW_to_USD", "Dividend"], horizontal=True)
-            i_date = c2.date_input("날짜")
-            c3, c4, c5 = st.columns(3)
-            i_usd = c3.number_input("금액 (USD)", min_value=0.01, step=0.01)
-            i_krw = c4.number_input("원화 (KRW)", min_value=0, disabled=(i_type=="Dividend"))
-            i_ticker = c5.text_input("종목코드 (배당용)", disabled=(i_type=="KRW_to_USD"))
-            i_note = st.text_input("비고", "수기입력")
+            col1, col2 = st.columns(2)
             
-            if st.form_submit_button("💾 저장하기"):
-                max_id = max(pd.to_numeric(u_trade['Order_ID']).max(), pd.to_numeric(u_money['Order_ID']).max())
-                next_id = int(max_id) + 1
-                rate = i_krw / i_usd if i_type=="KRW_to_USD" and i_usd > 0 else 0
-                tk_val = i_ticker if i_type=="Dividend" else "-"
+            # 날짜 (공통)
+            i_date = col1.date_input("날짜", datetime.now())
+            
+            # 금액 (공통 - USD)
+            i_usd = col2.number_input("금액 (USD)", min_value=0.01, step=0.01, format="%.2f")
+            
+            if mode == "💰 환전 (입금)":
+                # 환전 모드: 원화 입력 필수
+                i_krw = st.number_input("입금 원화 (KRW)", min_value=0, step=100)
+                # 환율 자동 계산 프리뷰
+                est_rate = i_krw / i_usd if i_usd > 0 else 0
+                if i_usd > 0:
+                    st.caption(f"💡 적용 환율: 1 USD = {est_rate:,.2f} KRW")
                 
-                ws_money = sheet_instance.worksheet("Money_Log")
-                ws_money.append_row([
-                    i_date.strftime("%Y-%m-%d"), next_id, i_type, tk_val,
-                    i_krw if i_type=="KRW_to_USD" else 0, i_usd,
-                    rate, "", "", i_note
-                ])
-                st.success("저장되었습니다! (Sync 버튼을 눌러 반영하세요)")
+                i_ticker = "-" # 환전은 티커 없음
+                i_type = "KRW_to_USD"
+                
+            else:
+                # 배당 모드: 종목 선택 (보유 종목 + 직접입력)
+                holding_list = list(portfolio.keys())
+                if 'Cash' in holding_list: holding_list.remove('Cash')
+                
+                # 보유 종목이 있으면 선택지로, 없으면 텍스트 입력
+                if holding_list:
+                    selected_ticker = st.selectbox("배당 종목 선택", options=holding_list + ["(직접 입력)"])
+                    if selected_ticker == "(직접 입력)":
+                        i_ticker = st.text_input("종목코드 입력 (예: AAPL)")
+                    else:
+                        i_ticker = selected_ticker
+                else:
+                    i_ticker = st.text_input("종목코드 입력 (예: O)")
+                
+                i_krw = 0 # 배당은 원화 투입 없음
+                i_type = "Dividend"
+            
+            i_note = st.text_input("비고", value="수기입력")
+            
+            # 제출 버튼
+            submitted = st.form_submit_button("💾 저장하기", use_container_width=True)
+            
+            if submitted:
+                # Validation
+                if mode == "🏦 배당 (수령)" and not i_ticker:
+                    st.error("종목코드를 입력해주세요.")
+                else:
+                    # ID 생성
+                    max_id = max(pd.to_numeric(u_trade['Order_ID']).max(), pd.to_numeric(u_money['Order_ID']).max())
+                    next_id = int(max_id) + 1
+                    
+                    rate = i_krw / i_usd if i_type=="KRW_to_USD" and i_usd > 0 else 0
+                    
+                    ws_money = sheet_instance.worksheet("Money_Log")
+                    ws_money.append_row([
+                        i_date.strftime("%Y-%m-%d"), next_id, i_type, i_ticker,
+                        i_krw, i_usd,
+                        rate, "", "", i_note
+                    ])
+                    st.success("✅ 저장되었습니다! 상단의 [API Sync] 버튼을 눌러 반영하세요.")
 
 if __name__ == "__main__":
     main()
