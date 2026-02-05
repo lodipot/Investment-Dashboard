@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import datetime, timedelta  # 수정됨: timedelta 추가
 import time
 import yfinance as yf
 import KIS_API_Manager as kis
 
+# ... (이하 코드는 그대로)
 # -------------------------------------------------------------------
 # [1] 설정 & 스타일 (Input Field Visibility Fix)
 # -------------------------------------------------------------------
