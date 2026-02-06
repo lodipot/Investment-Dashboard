@@ -402,7 +402,7 @@ def main():
                 "authorization": f"Bearer {token}",
                 "appkey": st.secrets["kis_api"]["APP_KEY"],
                 "appsecret": st.secrets["kis_api"]["APP_SECRET"],
-                "tr_id": "TTTS3012R", # 체결내역
+                "tr_id": "TTTS303R", # 체결내역
                 "custtype": "P"
             }
             # 2월 1일부터 조회
@@ -414,7 +414,7 @@ def main():
                 "CTX_AREA_FK100": "",
                 "CTX_AREA_NK100": ""
             }
-            url = f"{st.secrets['kis_api']['URL_BASE']}/uapi/overseas-stock/v1/trading/inquire-period-ccld"
+            url = f"{st.secrets['kis_api']['URL_BASE']}/uapi/overseas-stock/v1/trading/inquire-ccnl"
             st.write(f"Request: {url}")
             try:
                 res = requests.get(url, headers=headers, params=params)
