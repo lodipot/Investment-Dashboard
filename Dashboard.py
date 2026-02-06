@@ -9,9 +9,13 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 스타일 (백업.txt 기반 UI 유지)
+# [1] 설정 & 스타일
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
+
+# [세션 상태 초기화] - 시세 정보를 기억하기 위함
+if 'price_cache' not in st.session_state:
+    st.session_state['price_cache'] = {}
 
 # [색상 팔레트]
 THEME_BG = "#131314"
@@ -22,15 +26,10 @@ THEME_SUB = "#C4C7C5"
 
 COLOR_RED = "#FF5252"
 COLOR_BLUE = "#448AFF"
-COLOR_BG_RED = "rgba(255, 82, 82, 0.15)"
-COLOR_BG_BLUE = "rgba(68, 138, 255, 0.15)"
 
 st.markdown(f"""
 <style>
     .stApp {{ background-color: {THEME_BG} !important; color: {THEME_TEXT} !important; }}
-    header {{visibility: hidden;}}
-    .block-container {{ padding-top: 1.5rem; }}
-    
     /* KPI */
     .kpi-container {{ display: grid; grid-template-columns: 2fr 1.5fr 1.5fr; gap: 16px; margin-bottom: 24px; }}
     .kpi-card {{ background-color: {THEME_CARD}; padding: 24px; border-radius: 16px; border: 1px solid {THEME_BORDER}; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }}
@@ -41,9 +40,6 @@ st.markdown(f"""
     /* Utilities */
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
-    .txt-orange {{ color: #FF9800 !important; }}
-    .bg-red {{ background-color: {COLOR_BG_RED} !important; }}
-    .bg-blue {{ background-color: {COLOR_BG_BLUE} !important; }}
     
     /* Cards */
     .stock-card {{ background-color: {THEME_CARD}; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid {THEME_BORDER}; border-left: 6px solid #555; transition: transform 0.2s, box-shadow 0.2s; }}
@@ -54,7 +50,6 @@ st.markdown(f"""
     .card-ticker {{ font-size: 1.4rem; font-weight: 900; color: {THEME_TEXT}; }}
     .card-price {{ font-size: 1.1rem; font-weight: 500; color: {THEME_SUB}; }}
     .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: {THEME_TEXT}; text-align: right; margin-bottom: 4px; letter-spacing: -0.5px; }}
-    .card-sub-box {{ text-align: right; font-size: 1.0rem; font-weight: 600; }}
     
     /* Tables */
     .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; text-align: right; color: {THEME_TEXT}; }}
@@ -63,12 +58,6 @@ st.markdown(f"""
     .int-table td {{ padding: 12px 10px; border-bottom: 1px solid #2D2E30; }}
     .int-table td:first-child {{ text-align: left; font-weight: 700; color: #A8C7FA; }}
     .row-total {{ background-color: #2A2B2D; font-weight: 800; border-top: 2px solid {THEME_BORDER}; }}
-    .row-cash {{ background-color: {THEME_BG}; font-style: italic; color: {THEME_SUB}; }}
-
-    /* Streamlit Overrides */
-    .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
-    .stTabs [data-baseweb="tab"] {{ background-color: {THEME_CARD}; border-radius: 8px; color: {THEME_SUB}; padding: 6px 16px; border: 1px solid {THEME_BORDER}; }}
-    .stTabs [aria-selected="true"] {{ background-color: #3C4043 !important; color: #A8C7FA !important; border-color: #A8C7FA !important; }}
     
     /* Input Fields Fix */
     [data-testid="stForm"] {{ background-color: {THEME_CARD}; border: 1px solid {THEME_BORDER}; border-radius: 16px; padding: 24px; }}
@@ -84,11 +73,6 @@ st.markdown(f"""
 # -------------------------------------------------------------------
 # [2] 상수 및 데이터 정의
 # -------------------------------------------------------------------
-SECTOR_MAP = {
-    'GOOGL': '테크', 'NVDA': '테크', 'AMD': '테크', 'TSM': '테크', 'MSFT': '테크', 'AAPL': '테크', 'AMZN': '테크', 'TSLA': '테크', 'AVGO': '테크', 'SOXL': '테크',
-    'O': '배당', 'JEPI': '배당', 'JEPQ': '배당', 'SCHD': '배당', 'MAIN': '배당', 'KO': '배당',
-    'PLD': '리츠', 'AMT': '리츠'
-}
 SECTOR_ORDER_LIST = {
     '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO'], 
     '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'],
@@ -120,17 +104,6 @@ def load_data():
     
     df_money.columns = df_money.columns.str.strip()
     df_trade.columns = df_trade.columns.str.strip()
-
-    cols_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
-    for c in cols_money:
-        if c in df_money.columns:
-            df_money[c] = pd.to_numeric(df_money[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            
-    cols_trade = ['Qty', 'Price_USD', 'Ex_Avg_Rate']
-    for c in cols_trade:
-        if c in df_trade.columns:
-            df_trade[c] = pd.to_numeric(df_trade[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-
     return df_trade, df_money, sh
 
 def get_realtime_rate():
@@ -152,13 +125,11 @@ def process_timeline(df_trade, df_money):
     if 'Order_ID' not in df_money.columns: df_money['Order_ID'] = 0
     if 'Order_ID' not in df_trade.columns: df_trade['Order_ID'] = 0
     
-    # Date를 Datetime 객체로 변환 (시간 포함)
     df_money['Date_Obj'] = pd.to_datetime(df_money['Date'])
     df_trade['Date_Obj'] = pd.to_datetime(df_trade['Date'])
 
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
-    # [정렬 핵심] 날짜/시간 순서대로 정렬
     timeline = timeline.sort_values(by=['Date_Obj', 'Order_ID'])
     
     current_balance = 0.0
@@ -226,7 +197,7 @@ def process_timeline(df_trade, df_money):
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Helper: 카톡 파싱 함수 V2 (단순 복붙 대응)
+# [5] Helper: 카톡 파싱 (수정본)
 # -------------------------------------------------------------------
 def parse_kakaotalk_v2(text, base_date):
     parsed_data = []
@@ -260,7 +231,6 @@ def parse_kakaotalk_v2(text, base_date):
             price_m = re.search(r'\*체결단가:USD\s*([\d.]+)', block_content)
             
             if type_m and name_m and qty_m and price_m:
-                # [PM 요청] 매매는 전날 23:30으로 강제 보정
                 trade_dt = datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)
                 final_dt = trade_dt.strftime("%Y-%m-%d 23:30:00") 
                 
@@ -283,7 +253,6 @@ def parse_kakaotalk_v2(text, base_date):
     for match in div_pattern.finditer(full_text):
         date_part, ticker, amount = match.groups()
         m, d = map(int, date_part.split('/'))
-        # 배당은 당일 오후 3시로 설정
         div_dt = datetime(base_year, m, d, 15, 0, 0)
         
         parsed_data.append({
@@ -301,7 +270,6 @@ def parse_kakaotalk_v2(text, base_date):
     exch_pattern = re.compile(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?USD\s*([0-9,.]+)', re.DOTALL)
     for match in exch_pattern.finditer(full_text):
         krw_str, rate_str, usd_str = match.groups()
-        # 환전은 당일 오후 2시로 설정
         exch_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0)
         
         parsed_data.append({
@@ -330,12 +298,22 @@ def main():
     u_trade, u_money, cur_bal, cur_rate, portfolio = process_timeline(df_trade, df_money)
     cur_real_rate = get_realtime_rate()
     
+    # [시세 조회 개선] 세션에 없으면 한 번만 조회 (뿌연 화면 방지)
     tickers = list(portfolio.keys())
-    prices = {}
     if tickers:
-        with st.spinner("시장가 조회 중..."):
-            for t in tickers:
-                prices[t] = kis.get_current_price(t)
+        # 1. 아직 캐시가 비어있거나, 새로운 종목이 생겼을 때만 조회
+        tickers_to_fetch = [t for t in tickers if t not in st.session_state['price_cache']]
+        
+        if tickers_to_fetch:
+            with st.spinner("최신 시세를 조회 중입니다... (최초 1회)"):
+                for t in tickers_to_fetch:
+                    price = kis.get_current_price(t)
+                    st.session_state['price_cache'][t] = price
+        
+        # 2. 캐시된 가격 사용
+        prices = st.session_state['price_cache']
+    else:
+        prices = {}
     
     # KPI Logic
     total_stock_val_krw = 0.0
@@ -362,7 +340,9 @@ def main():
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
     with c2:
-        if st.button("🔄 Data Reload"):
+        # 수동 갱신 버튼: 누르면 캐시를 비우고 다시 로드
+        if st.button("🔄 시세/데이터 새로고침"):
+            st.session_state['price_cache'] = {} # 캐시 초기화
             st.rerun()
 
     # KPI UI
@@ -391,7 +371,6 @@ def main():
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] Dashboard (Card View + Detail Restore)
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -451,7 +430,6 @@ def main():
                 with cols[idx % 4]:
                     st.markdown(html, unsafe_allow_html=True)
 
-    # [Tab 2] Integrated Table
     with tab2:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
         rows_html = ""
@@ -515,13 +493,12 @@ def main():
         full_table = header + rows_html + cash_row + total_row + "</tbody></table>"
         st.markdown(full_table, unsafe_allow_html=True)
 
-    # [Tab 3] Log
     with tab3:
         st.dataframe(u_trade[['Date', 'Ticker', 'Type', 'Qty', 'Price_USD', 'Note']].fillna(''), use_container_width=True)
         st.dataframe(u_money[['Date', 'Type', 'USD_Amount', 'KRW_Amount', 'Note']].fillna(''), use_container_width=True)
 
     # ---------------------------------------------------------
-    # [Tab 4] Input Manager (Final Fix: Write to DB)
+    # [Tab 4] Input Manager (저장 로직 Fix - 형변환)
     # ---------------------------------------------------------
     with tab4:
         st.subheader("📝 입출금 및 배당 관리")
@@ -546,7 +523,6 @@ def main():
                         edited_df = st.data_editor(df_parsed, use_container_width=True, num_rows="dynamic")
                         
                         if st.button("💾 DB에 저장하기"):
-                            # [중요] 저장 로직
                             ws_trade = sheet_instance.worksheet("Trade_Log")
                             ws_money = sheet_instance.worksheet("Money_Log")
                             
@@ -556,26 +532,27 @@ def main():
                             trade_rows = []
                             money_rows = []
                             
+                            # [핵심 Fix] Pandas 타입(int64, float64)을 Python 기본 타입(int, float)으로 강제 변환
                             for _, row in edited_df.iterrows():
                                 if row['Category'] == 'Trade':
                                     trade_rows.append([
                                         str(row['Date']),
-                                        next_id,
-                                        row['Ticker'],
-                                        row['Ticker'],
-                                        row['Type'],
+                                        int(next_id),
+                                        str(row['Ticker']),
+                                        str(row['Ticker']),
+                                        str(row['Type']),
                                         int(row['Qty']),
                                         float(row['Price']),
-                                        "", # Ex_Avg_Rate
-                                        "카톡파싱" # Note
+                                        "", 
+                                        "카톡파싱"
                                     ])
                                 elif row['Category'] in ['Dividend', 'Exchange']:
                                     rate = row['Amount_KRW'] / row['Price'] if row['Amount_KRW'] > 0 else 0
                                     money_rows.append([
                                         str(row['Date']),
-                                        next_id,
-                                        row['Type'],
-                                        row['Ticker'],
+                                        int(next_id),
+                                        str(row['Type']),
+                                        str(row['Ticker']),
                                         float(row['Amount_KRW']),
                                         float(row['Price']),
                                         float(rate),
@@ -589,9 +566,9 @@ def main():
                                 ws_money.append_rows(money_rows)
                                 
                             st.success(f"✅ 총 {len(trade_rows) + len(money_rows)}건 저장 완료!")
+                            st.session_state['price_cache'] = {} # 캐시 초기화
                             time.sleep(2)
-                            st.cache_data.clear() # 캐시 초기화
-                            st.rerun() # 새로고침
+                            st.rerun()
                     else:
                         st.warning("⚠️ 분석 가능한 내역이 없습니다.")
 
@@ -610,14 +587,13 @@ def main():
                     next_id = int(max_id) + 1
                     rate = i_krw / i_usd if i_type=="KRW_to_USD" and i_usd > 0 else 0
                     
-                    ws_money = sheet_instance.worksheet("Money_Log")
-                    ws_money.append_row([
-                        i_date.strftime("%Y-%m-%d"), next_id, i_type, i_ticker,
-                        i_krw, i_usd, rate, "", "", i_note
+                    sheet_instance.worksheet("Money_Log").append_row([
+                        i_date.strftime("%Y-%m-%d"), int(next_id), i_type, i_ticker,
+                        int(i_krw), float(i_usd), float(rate), "", "", i_note
                     ])
                     st.success("저장 완료!")
+                    st.session_state['price_cache'] = {}
                     time.sleep(1)
-                    st.cache_data.clear()
                     st.rerun()
 
 if __name__ == "__main__":
