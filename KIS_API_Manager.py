@@ -9,11 +9,15 @@ import time
 # =========================================================
 # [1] 설정 및 상수
 # =========================================================
-URL_BASE = st.secrets["kis_api"]["URL_BASE"]
-APP_KEY = st.secrets["kis_api"]["APP_KEY"]
-APP_SECRET = st.secrets["kis_api"]["APP_SECRET"]
-CANO = st.secrets["kis_api"]["CANO"]
-ACNT_PRDT_CD = st.secrets["kis_api"]["ACNT_PRDT_CD"]
+try:
+    URL_BASE = st.secrets["kis_api"]["URL_BASE"]
+    APP_KEY = st.secrets["kis_api"]["APP_KEY"]
+    APP_SECRET = st.secrets["kis_api"]["APP_SECRET"]
+    CANO = st.secrets["kis_api"]["CANO"]
+    ACNT_PRDT_CD = st.secrets["kis_api"]["ACNT_PRDT_CD"]
+except Exception:
+    st.error("secrets.toml 파일에 [kis_api] 설정이 올바르지 않습니다.")
+    st.stop()
 
 # =========================================================
 # [2] 토큰 관리 (Smart Refresh)
@@ -116,7 +120,7 @@ def get_current_price(ticker):
     return 0.0
 
 # =========================================================
-# [3] 핵심: 하이브리드 거래내역 조회 (기간별 + 잔고)
+# [3] 하이브리드 거래내역 조회 (History + Balance Check)
 # =========================================================
 def get_trade_history(start_date, end_date):
     token = get_access_token()
@@ -124,9 +128,8 @@ def get_trade_history(start_date, end_date):
 
     final_result = []
 
-    # --- TRACK A: 기간별 결제내역 조회 (CTOS4001R) ---
-    # * 목적: 이미 결제(T+2)가 끝나서 원장에 박제된 '확정 데이터' 조회
-    # * 2월 3일 거래는 이제 여기에 들어와야 정상입니다.
+    # --- TRACK A: 기간별 결제내역 (CTOS4001R) ---
+    # * 역할: D+3일이 지나 '확정'된 거래 내역을 가져옵니다.
     try:
         headers_hist = {
             "content-type": "application/json",
@@ -140,9 +143,9 @@ def get_trade_history(start_date, end_date):
         params_hist = {
             "CANO": CANO,
             "ACNT_PRDT_CD": ACNT_PRDT_CD,
-            "ORD_DT_S": start_date, # YYYYMMDD
-            "ORD_DT_E": end_date,   # YYYYMMDD
-            "WCRC_DVSN": "00",      # 외화기준
+            "ORD_DT_S": start_date,
+            "ORD_DT_E": end_date,
+            "WCRC_DVSN": "00",
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": ""
         }
@@ -153,29 +156,29 @@ def get_trade_history(start_date, end_date):
             data = res_hist.json()
             if 'output1' in data:
                 for item in data['output1']:
-                    # dt: 거래일자, pdno: 종목코드, ccld_qty: 체결수량
+                    # dt가 있고 체결수량이 있는 경우
                     if item.get('dt') and float(item.get('ccld_qty', 0)) > 0:
                         final_result.append({
-                            'dt': item['dt'],  # 날짜 형식 YYYYMMDD
+                            'dt': item['dt'], 
                             'pdno': item['pdno'],
                             'prdt_name': item['ovrs_item_name'],
                             'sll_buy_dvsn_cd': item['sll_buy_dvsn_cd'], # 01:매도, 02:매수
                             'ccld_qty': str(int(float(item['ccld_qty']))),
-                            # 체결단가 (소수점 처리)
                             'ft_ccld_unpr3': item.get('ovrs_stck_ccld_unpr', '0') 
                         })
-    except Exception as e:
-        print(f"Track A Error: {e}")
+    except Exception:
+        pass # Track A 실패해도 Track B 시도
 
-    # --- TRACK B: 체결기준 현재잔고 조회 (CTRP6504R) ---
-    # * 목적: 아직 결제일(T+2)이 안 되어서 Track A에 안 뜨는 '당일 체결분' 확인
+    # --- TRACK B: 체결기준 현재잔고 (CTRP6504R) ---
+    # * 역할: '금일(Today)' 체결된 내역을 잔고 변동으로 감지합니다. (T+0 대응)
+    # * 중요: 이 API는 오늘 2/3일 거래가 있다면 'thdt_buy_ccld_qty1'에 수량을 표시합니다.
     try:
         headers_bal = {
             "content-type": "application/json",
             "authorization": f"Bearer {token}",
             "appkey": APP_KEY,
             "appsecret": APP_SECRET,
-            "tr_id": "CTRP6504R",
+            "tr_id": "CTRP6504R", # 체결기준잔고
             "custtype": "P"
         }
         
@@ -194,23 +197,23 @@ def get_trade_history(start_date, end_date):
             data_bal = res_bal.json()
             if 'output1' in data_bal:
                 for item in data_bal['output1']:
-                    # 금일 매수 체결 수량(thdt_buy_ccld_qty1) 확인
+                    # 금일 매수 체결 수량 확인
                     today_buy = float(item.get('thdt_buy_ccld_qty1', 0))
                     
                     if today_buy > 0:
-                        # 오늘 날짜로 생성
-                        today_str = datetime.now().strftime("%Y%m%d")
-                        
-                        # Dashboard.py에서 중복 체크하므로 일단 추가
+                        # 주의: 잔고 API는 거래 '날짜'를 안 줍니다. 
+                        # 하지만 '금일 체결'이므로 오늘 날짜로 생성해서 넘겨주면,
+                        # Dashboard.py가 중복체크 후 DB에 넣습니다.
+                        # (나중에 사용자가 날짜를 2/3으로 수정하면 됨)
                         final_result.append({
-                            'dt': today_str, 
+                            'dt': datetime.now().strftime("%Y%m%d"), 
                             'pdno': item['pdno'],
                             'prdt_name': item['prdt_name'],
                             'sll_buy_dvsn_cd': '02', # 매수
                             'ccld_qty': str(int(today_buy)),
-                            'ft_ccld_unpr3': item.get('pchs_avg_pric', '0') # 매입평균가로 대체
+                            'ft_ccld_unpr3': item.get('pchs_avg_pric', '0') # 매입평균가 사용
                         })
-    except Exception as e:
-        print(f"Track B Error: {e}")
+    except Exception:
+        pass
 
     return {'output1': final_result}
