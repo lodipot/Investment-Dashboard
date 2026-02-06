@@ -115,6 +115,8 @@ def get_current_price(ticker):
             continue
     return 0.0
 
+# [API 변경] 기간별 '체결내역(결제기준)' -> 기간별 '주문/체결내역(매매기준)'
+# TR_ID: JTTT3001R (해외주식 주문체결내역)
 def get_trade_history(start_date, end_date):
     token = get_access_token()
     if not token: return None
@@ -124,7 +126,7 @@ def get_trade_history(start_date, end_date):
         "authorization": f"Bearer {token}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
-        "tr_id": "CTOS4001R",
+        "tr_id": "JTTT3001R", # [변경] 주문체결내역 TR
         "custtype": "P"
     }
     
@@ -133,10 +135,38 @@ def get_trade_history(start_date, end_date):
         "ACNT_PRDT_CD": ACNT_PRDT_CD,
         "ORD_DT_S": start_date,
         "ORD_DT_E": end_date,
-        "WCRC_DVSN": "00",
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": ""
     }
     
-    res = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers, params=params)
-    return res.json() if res.status_code == 200 else None
+    res = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-period-ccld", headers, params=params)
+    
+    if res.status_code == 200:
+        data = res.json()
+        output_list = []
+        
+        # JTTT3001R 응답 포맷을 기존 로직(Dashboard.py)이 이해할 수 있는 형태로 변환
+        if 'output1' in data:
+            for item in data['output1']:
+                # 미체결 내역은 제외 (체결수량 > 0 인 것만)
+                # JTTT3001R은 'ccld_qty'(체결수량) 필드가 있음
+                ccld_qty = int(item.get('ccld_qty', 0)) if item.get('ccld_qty') else 0
+                
+                if ccld_qty > 0:
+                    # 필드 매핑 (CTOS4001R -> JTTT3001R 차이 보정)
+                    mapped_item = {
+                        'dt': item['ord_dt'],        # 주문일자 (거래일)
+                        'pdno': item['pdno'],        # 종목코드
+                        'prdt_name': item['prdt_name'], # 종목명
+                        'sll_buy_dvsn_cd': item['sll_buy_dvsn_cd'], # 01:매도, 02:매수
+                        'ccld_qty': str(ccld_qty),
+                        # ft_ccld_unpr3: 체결단가 (소수점 포함 3자리) vs ft_ord_unpr3? 
+                        # 보통 avg_prvs (체결평균가) 사용이 안전
+                        'ft_ccld_unpr3': item.get('avg_prvs', item.get('ft_ccld_unpr3', '0')) 
+                    }
+                    output_list.append(mapped_item)
+                    
+            # 변환된 리스트를 output1 키에 담아 리턴 (Dashboard.py 호환성 유지)
+            return {'output1': output_list}
+            
+    return None
