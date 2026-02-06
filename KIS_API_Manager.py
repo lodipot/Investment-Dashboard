@@ -115,93 +115,102 @@ def get_current_price(ticker):
             continue
     return 0.0
 
-# [통합 함수] 기간별 거래내역(CTOS4001R) + 잔고내역(CTRP6504R) 하이브리드 조회
+# =========================================================
+# [3] 핵심: 하이브리드 거래내역 조회 (기간별 + 잔고)
+# =========================================================
 def get_trade_history(start_date, end_date):
     token = get_access_token()
     if not token: return None
 
-    output_list = []
-    
-    # -----------------------------------------------------------
-    # 1. 정석 방법: 기간별 결제내역 조회 (CTOS4001R)
-    # -----------------------------------------------------------
-    headers_hist = {
-        "content-type": "application/json",
-        "authorization": f"Bearer {token}",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET,
-        "tr_id": "CTOS4001R", 
-        "custtype": "P"
-    }
-    
-    params_hist = {
-        "CANO": CANO,
-        "ACNT_PRDT_CD": ACNT_PRDT_CD,
-        "ORD_DT_S": start_date,
-        "ORD_DT_E": end_date,
-        "WCRC_DVSN": "00",     # 외화기준
-        "CTX_AREA_FK100": "",
-        "CTX_AREA_NK100": ""
-    }
-    
-    res_hist = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers_hist, params=params_hist)
-    
-    if res_hist.status_code == 200:
-        data = res_hist.json()
-        if 'output1' in data:
-            for item in data['output1']:
-                # 거래내역 데이터 매핑
-                # dt: 거래일자, pdno: 종목코드, ccld_qty: 체결수량
-                if item.get('dt') and float(item.get('ccld_qty', 0)) > 0:
-                    output_list.append({
-                        'dt': item['dt'], 
-                        'pdno': item['pdno'],
-                        'prdt_name': item['ovrs_item_name'],
-                        'sll_buy_dvsn_cd': item['sll_buy_dvsn_cd'], # 01:매도, 02:매수
-                        'ccld_qty': str(int(float(item['ccld_qty']))),
-                        'ft_ccld_unpr3': item.get('ovrs_stck_ccld_unpr', '0') # 체결단가
-                    })
+    final_result = []
 
-    # -----------------------------------------------------------
-    # 2. 비상 방법: 체결기준 잔고 조회 (CTRP6504R)
-    # - 목적: 기간별 내역에 아직 안 떴는데 잔고에는 있는(당일 매수 등) 건을 찾기 위함
-    # -----------------------------------------------------------
-    headers_bal = {
-        "content-type": "application/json",
-        "authorization": f"Bearer {token}",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET,
-        "tr_id": "CTRP6504R",
-        "custtype": "P"
-    }
-    
-    params_bal = {
-        "CANO": CANO,
-        "ACNT_PRDT_CD": ACNT_PRDT_CD,
-        "WCRC_FRCR_DVSN_CD": "01",
-        "NATN_CD": "840",
-        "TR_MKET_CD": "00",
-        "INQR_DVSN_CD": "00"
-    }
-    
-    res_bal = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-present-balance", headers_bal, params=params_bal)
-    
-    if res_bal.status_code == 200:
-        data_bal = res_bal.json()
-        if 'output1' in data_bal:
-            for item in data_bal['output1']:
-                # 금일 매수 체결 수량(thdt_buy_ccld_qty1)이 있는 경우만 추출
-                today_buy = float(item.get('thdt_buy_ccld_qty1', 0))
-                if today_buy > 0:
-                    # 중복 방지 로직은 Dashboard.py에서 처리하므로 여기선 일단 담음
-                    # 날짜는 '오늘'로 찍힘 -> 나중에 DB에서 날짜 수정 필요할 수 있음
-                    output_list.append({
-                        'dt': datetime.now().strftime("%Y%m%d"), 
-                        'pdno': item['pdno'],
-                        'prdt_name': item['prdt_name'],
-                        'sll_buy_dvsn_cd': '02', # 매수
-                        'ccld_qty': str(int(today_buy)),
-                        'ft_ccld_unpr3': item.get('pchs_avg_pric', '0') # 평균단가
-                    })
+    # --- TRACK A: 기간별 결제내역 조회 (CTOS4001R) ---
+    # * 목적: 이미 결제(T+2)가 끝나서 원장에 박제된 '확정 데이터' 조회
+    # * 2월 3일 거래는 이제 여기에 들어와야 정상입니다.
+    try:
+        headers_hist = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+            "tr_id": "CTOS4001R", 
+            "custtype": "P"
+        }
+        
+        params_hist = {
+            "CANO": CANO,
+            "ACNT_PRDT_CD": ACNT_PRDT_CD,
+            "ORD_DT_S": start_date, # YYYYMMDD
+            "ORD_DT_E": end_date,   # YYYYMMDD
+            "WCRC_DVSN": "00",      # 외화기준
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": ""
+        }
+        
+        res_hist = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers_hist, params=params_hist)
+        
+        if res_hist.status_code == 200:
+            data = res_hist.json()
+            if 'output1' in data:
+                for item in data['output1']:
+                    # dt: 거래일자, pdno: 종목코드, ccld_qty: 체결수량
+                    if item.get('dt') and float(item.get('ccld_qty', 0)) > 0:
+                        final_result.append({
+                            'dt': item['dt'],  # 날짜 형식 YYYYMMDD
+                            'pdno': item['pdno'],
+                            'prdt_name': item['ovrs_item_name'],
+                            'sll_buy_dvsn_cd': item['sll_buy_dvsn_cd'], # 01:매도, 02:매수
+                            'ccld_qty': str(int(float(item['ccld_qty']))),
+                            # 체결단가 (소수점 처리)
+                            'ft_ccld_unpr3': item.get('ovrs_stck_ccld_unpr', '0') 
+                        })
+    except Exception as e:
+        print(f"Track A Error: {e}")
 
-    return {'output1': output_list}
+    # --- TRACK B: 체결기준 현재잔고 조회 (CTRP6504R) ---
+    # * 목적: 아직 결제일(T+2)이 안 되어서 Track A에 안 뜨는 '당일 체결분' 확인
+    try:
+        headers_bal = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+            "tr_id": "CTRP6504R",
+            "custtype": "P"
+        }
+        
+        params_bal = {
+            "CANO": CANO,
+            "ACNT_PRDT_CD": ACNT_PRDT_CD,
+            "WCRC_FRCR_DVSN_CD": "01",
+            "NATN_CD": "840", # 미국
+            "TR_MKET_CD": "00",
+            "INQR_DVSN_CD": "00"
+        }
+        
+        res_bal = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-present-balance", headers_bal, params=params_bal)
+        
+        if res_bal.status_code == 200:
+            data_bal = res_bal.json()
+            if 'output1' in data_bal:
+                for item in data_bal['output1']:
+                    # 금일 매수 체결 수량(thdt_buy_ccld_qty1) 확인
+                    today_buy = float(item.get('thdt_buy_ccld_qty1', 0))
+                    
+                    if today_buy > 0:
+                        # 오늘 날짜로 생성
+                        today_str = datetime.now().strftime("%Y%m%d")
+                        
+                        # Dashboard.py에서 중복 체크하므로 일단 추가
+                        final_result.append({
+                            'dt': today_str, 
+                            'pdno': item['pdno'],
+                            'prdt_name': item['prdt_name'],
+                            'sll_buy_dvsn_cd': '02', # 매수
+                            'ccld_qty': str(int(today_buy)),
+                            'ft_ccld_unpr3': item.get('pchs_avg_pric', '0') # 매입평균가로 대체
+                        })
+    except Exception as e:
+        print(f"Track B Error: {e}")
+
+    return {'output1': final_result}
