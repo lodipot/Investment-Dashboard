@@ -145,7 +145,7 @@ def get_realtime_rate():
     except: return 1450.0
 
 # -------------------------------------------------------------------
-# [4] 엔진: 달러 저수지 & 포트폴리오 계산 (CRITICAL FIX)
+# [4] 엔진: 달러 저수지 & 포트폴리오 계산 (날짜/시간 정밀 처리 수정)
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money):
     df_money['Source'] = 'Money'
@@ -154,26 +154,28 @@ def process_timeline(df_trade, df_money):
     if 'Order_ID' not in df_money.columns: df_money['Order_ID'] = 0
     if 'Order_ID' not in df_trade.columns: df_trade['Order_ID'] = 0
     
-    # [FIX: 날짜 처리 강화]
-    # 문자열로 변환 -> 날짜 객체로 변환 (에러 발생 시 NaT 처리로 죽는 것 방지)
-    df_money['Date_Obj'] = pd.to_datetime(df_money['Date'].astype(str), errors='coerce')
-    df_trade['Date_Obj'] = pd.to_datetime(df_trade['Date'].astype(str), errors='coerce')
-
-    # 날짜 없는 데이터(오류)는 제외
-    df_money = df_money.dropna(subset=['Date_Obj'])
-    df_trade = df_trade.dropna(subset=['Date_Obj'])
+    # [수정됨] 날짜 처리 로직 강화: 시간 데이터를 버리지 않고 모두 살림
+    # to_datetime을 사용하여 '2025-12-31'은 '2025-12-31 00:00:00'으로,
+    # '2026-02-06 15:30:00'은 그대로 유지하여 시간순 정렬 가능하게 함.
+    try:
+        df_money['Date_Obj'] = pd.to_datetime(df_money['Date'].astype(str))
+        df_trade['Date_Obj'] = pd.to_datetime(df_trade['Date'].astype(str))
+    except Exception as e:
+        # 혹시라도 실패하면, 로그를 남기고 가능한 부분만 처리 (비상용)
+        # 하지만 위 코드는 대부분의 형식을 자동으로 처리합니다.
+        st.error(f"날짜 변환 중 오류 발생: {e}")
+        return df_trade, df_money, 0, 0, {}
 
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
     
-    # 시간순 정렬 (과거 -> 미래)
+    # [정렬 기준] 날짜(시간포함) -> Order_ID 순서로 정렬
     timeline = timeline.sort_values(by=['Date_Obj', 'Order_ID'])
     
     current_balance = 0.0
     current_avg_rate = 0.0
     portfolio = {} 
     
-    # [핵심 로직] 시간순으로 흘러가며 잔고 및 평단 계산
     for idx, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
@@ -184,19 +186,17 @@ def process_timeline(df_trade, df_money):
             ticker = str(row.get('Ticker', '')).strip()
             if ticker == '' or ticker == '-' or ticker == 'nan': ticker = 'Cash'
             
-            # 배당: 달러는 늘지만, 내 돈(KRW)을 투입한 건 아님 -> 평단 희석 효과 (단가 하락)
+            # 배당: 평단 희석
             if 'dividend' in t_type or '배당' in t_type:
                 if ticker != 'Cash':
                     if ticker not in portfolio: 
                         portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
                 
-                # 배당금 입금 시: 
-                # 공식: (기존잔고 * 기존평단 + 0원) / (기존잔고 + 배당금) -> 평단 내려감
                 if current_balance + usd_amt > 0:
                     current_avg_rate = (current_balance * current_avg_rate) / (current_balance + usd_amt)
             
-            # 환전(입금): KRW 투입 -> 평단 갱신
+            # 환전(입금): 평단 갱신
             else:
                 if current_balance + usd_amt > 0:
                     current_avg_rate = ((current_balance * current_avg_rate) + krw_amt) / (current_balance + usd_amt)
@@ -213,9 +213,7 @@ def process_timeline(df_trade, df_money):
                 portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0}
             
             if 'buy' in t_type or '매수' in t_type:
-                current_balance -= amount # 달러 차감
-                
-                # [DB에 기록된 환율이 없으면, 현재 계산된 이동평균 환율 사용]
+                current_balance -= amount
                 ex_rate_db = safe_float(row.get('Ex_Avg_Rate'))
                 rate_to_use = ex_rate_db if ex_rate_db > 0 else current_avg_rate
                 
@@ -224,25 +222,14 @@ def process_timeline(df_trade, df_money):
                 portfolio[ticker]['invested_usd'] += amount 
                 
             elif 'sell' in t_type or '매도' in t_type:
-                current_balance += amount # 달러 입금
-                
-                # 매도 시점의 환율이 아니라, 매도 금액만큼 달러가 생기므로 
-                # 이동평균법상 평단은 변하지 않음 (단지 잔고 규모만 커짐)
-                # 단, 회계적으로는 선입선출 등으로 실현손익 계산
-                
+                current_balance += amount
                 if portfolio[ticker]['qty'] > 0:
-                    # 매도한 수량만큼의 '평균 매수 단가(KRW)' 계산
                     avg_unit_invest_krw = portfolio[ticker]['invested_krw'] / portfolio[ticker]['qty']
                     cost_krw = qty * avg_unit_invest_krw
-                    
                     avg_unit_invest_usd = portfolio[ticker]['invested_usd'] / portfolio[ticker]['qty']
                     cost_usd = qty * avg_unit_invest_usd
                     
-                    # 실현손익 (KRW 기준): 매도금액(KRW환산) - 매수원금(KRW)
-                    # 여기서 매도금액 환산은 '현재 환율'이 아닌 '매도 시점 환율'이 맞으나, 
-                    # 예수금 관점에서는 현재 보유한 달러의 가치(current_avg_rate)로 평가
                     sell_val_krw = amount * current_avg_rate 
-                    
                     pl_krw = sell_val_krw - cost_krw
                     portfolio[ticker]['realized_krw'] += pl_krw
                     
@@ -253,7 +240,7 @@ def process_timeline(df_trade, df_money):
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Helper: 카톡 파싱 (Old Code 스타일의 확실한 파싱)
+# [5] Helper: 카톡 파싱 (정밀 시간 처리)
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -264,6 +251,7 @@ def parse_kakaotalk_final(text, base_date):
     full_text = "\n".join([l.strip() for l in lines if l.strip()])
 
     # 1. 매매 파싱 (체결안내)
+    # 정규식으로 블록 분리
     blocks = re.split(r'\[한국투자증권 체결안내\]', full_text)
     
     for block in blocks:
@@ -279,7 +267,7 @@ def parse_kakaotalk_final(text, base_date):
         price_m = re.search(r'\*체결단가:USD\s*([\d.]+)', block)
         
         if type_m and name_m and qty_m and price_m:
-            # 시간 보정: 전날 23:30
+            # 시간 보정: 카톡 수신일(base_date) 기준 전날 23:30으로 설정
             trade_dt = datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)
             final_dt = trade_dt.strftime("%Y-%m-%d 23:30:00")
             
@@ -299,6 +287,7 @@ def parse_kakaotalk_final(text, base_date):
     for match in div_pattern.finditer(full_text):
         date_part, ticker, amount = match.groups()
         m, d = map(int, date_part.split('/'))
+        # 배당은 당일 오후 3시 (15:00)
         div_dt = datetime(base_year, m, d, 15, 0, 0)
         
         parsed_list.append({
@@ -316,6 +305,7 @@ def parse_kakaotalk_final(text, base_date):
     exch_pattern = re.compile(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?USD\s*([0-9,.]+)', re.DOTALL)
     for match in exch_pattern.finditer(full_text):
         krw_str, rate_str, usd_str = match.groups()
+        # 환전은 당일 오후 2시 (14:00)
         exch_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0)
         
         parsed_list.append({
@@ -341,7 +331,7 @@ def main():
         st.error("DB 연결 실패.")
         st.stop()
         
-    # 엔진 실행 (오류 수정됨)
+    # 엔진 실행 (시간 포함 정렬)
     u_trade, u_money, cur_bal, cur_rate, portfolio = process_timeline(df_trade, df_money)
     cur_real_rate = get_realtime_rate()
     
@@ -414,7 +404,7 @@ def main():
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] Dashboard
+    # [Tab 1] Dashboard (Card View + Detail Restore)
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -543,7 +533,7 @@ def main():
         st.dataframe(u_money[['Date', 'Type', 'USD_Amount', 'KRW_Amount', 'Note']].fillna(''), use_container_width=True)
 
     # ---------------------------------------------------------
-    # [Tab 4] Input Manager (저장 로직 Fix)
+    # [Tab 4] Input Manager (1월 28일 구버전 로직 부활)
     # ---------------------------------------------------------
     with tab4:
         st.subheader("📝 입출금 및 배당 관리")
@@ -570,7 +560,6 @@ def main():
                     count = 0
                     base_year = ref_date.year
                     
-                    # 텍스트 전처리
                     full_text = raw_text.replace('\r', '')
                     
                     # 1. 매수/매도 파싱
