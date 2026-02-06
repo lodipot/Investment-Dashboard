@@ -134,7 +134,6 @@ def load_data():
 
 def get_realtime_rate():
     try:
-        # 환율도 세션에 캐싱하여 반복 호출 방지
         if 'fx_rate' not in st.session_state:
             ticker = yf.Ticker("KRW=X")
             data = ticker.history(period="1d")
@@ -146,7 +145,7 @@ def get_realtime_rate():
     except: return 1450.0
 
 # -------------------------------------------------------------------
-# [4] 엔진: 달러 저수지 & 포트폴리오 계산
+# [4] 엔진: 달러 저수지 & 포트폴리오 계산 (CRITICAL FIX)
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money):
     df_money['Source'] = 'Money'
@@ -155,16 +154,26 @@ def process_timeline(df_trade, df_money):
     if 'Order_ID' not in df_money.columns: df_money['Order_ID'] = 0
     if 'Order_ID' not in df_trade.columns: df_trade['Order_ID'] = 0
     
+    # [FIX: 날짜 처리 강화]
+    # 문자열로 변환 -> 날짜 객체로 변환 (에러 발생 시 NaT 처리로 죽는 것 방지)
+    df_money['Date_Obj'] = pd.to_datetime(df_money['Date'].astype(str), errors='coerce')
+    df_trade['Date_Obj'] = pd.to_datetime(df_trade['Date'].astype(str), errors='coerce')
+
+    # 날짜 없는 데이터(오류)는 제외
+    df_money = df_money.dropna(subset=['Date_Obj'])
+    df_trade = df_trade.dropna(subset=['Date_Obj'])
+
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
-    # 날짜 정렬
-    timeline['Date'] = pd.to_datetime(timeline['Date'])
-    timeline = timeline.sort_values(by=['Date', 'Order_ID'])
+    
+    # 시간순 정렬 (과거 -> 미래)
+    timeline = timeline.sort_values(by=['Date_Obj', 'Order_ID'])
     
     current_balance = 0.0
     current_avg_rate = 0.0
     portfolio = {} 
     
+    # [핵심 로직] 시간순으로 흘러가며 잔고 및 평단 계산
     for idx, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
@@ -175,17 +184,24 @@ def process_timeline(df_trade, df_money):
             ticker = str(row.get('Ticker', '')).strip()
             if ticker == '' or ticker == '-' or ticker == 'nan': ticker = 'Cash'
             
+            # 배당: 달러는 늘지만, 내 돈(KRW)을 투입한 건 아님 -> 평단 희석 효과 (단가 하락)
             if 'dividend' in t_type or '배당' in t_type:
                 if ticker != 'Cash':
                     if ticker not in portfolio: 
                         portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
+                
+                # 배당금 입금 시: 
+                # 공식: (기존잔고 * 기존평단 + 0원) / (기존잔고 + 배당금) -> 평단 내려감
+                if current_balance + usd_amt > 0:
+                    current_avg_rate = (current_balance * current_avg_rate) / (current_balance + usd_amt)
+            
+            # 환전(입금): KRW 투입 -> 평단 갱신
+            else:
+                if current_balance + usd_amt > 0:
+                    current_avg_rate = ((current_balance * current_avg_rate) + krw_amt) / (current_balance + usd_amt)
             
             current_balance += usd_amt
-            if current_balance > 0.0001:
-                prev_val = (current_balance - usd_amt) * current_avg_rate
-                added_val = 0 if ('dividend' in t_type or '배당' in t_type) else krw_amt
-                current_avg_rate = (prev_val + added_val) / current_balance
 
         elif source == 'Trade':
             qty = safe_float(row.get('Qty'))
@@ -197,25 +213,35 @@ def process_timeline(df_trade, df_money):
                 portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0}
             
             if 'buy' in t_type or '매수' in t_type:
-                current_balance -= amount
-                ex_rate = safe_float(row.get('Ex_Avg_Rate'))
-                if ex_rate == 0: 
-                    ex_rate = current_avg_rate
+                current_balance -= amount # 달러 차감
+                
+                # [DB에 기록된 환율이 없으면, 현재 계산된 이동평균 환율 사용]
+                ex_rate_db = safe_float(row.get('Ex_Avg_Rate'))
+                rate_to_use = ex_rate_db if ex_rate_db > 0 else current_avg_rate
                 
                 portfolio[ticker]['qty'] += qty
-                portfolio[ticker]['invested_krw'] += (amount * ex_rate)
+                portfolio[ticker]['invested_krw'] += (amount * rate_to_use)
                 portfolio[ticker]['invested_usd'] += amount 
                 
             elif 'sell' in t_type or '매도' in t_type:
-                current_balance += amount
-                sell_val_krw = amount * current_avg_rate 
+                current_balance += amount # 달러 입금
+                
+                # 매도 시점의 환율이 아니라, 매도 금액만큼 달러가 생기므로 
+                # 이동평균법상 평단은 변하지 않음 (단지 잔고 규모만 커짐)
+                # 단, 회계적으로는 선입선출 등으로 실현손익 계산
                 
                 if portfolio[ticker]['qty'] > 0:
+                    # 매도한 수량만큼의 '평균 매수 단가(KRW)' 계산
                     avg_unit_invest_krw = portfolio[ticker]['invested_krw'] / portfolio[ticker]['qty']
                     cost_krw = qty * avg_unit_invest_krw
                     
                     avg_unit_invest_usd = portfolio[ticker]['invested_usd'] / portfolio[ticker]['qty']
                     cost_usd = qty * avg_unit_invest_usd
+                    
+                    # 실현손익 (KRW 기준): 매도금액(KRW환산) - 매수원금(KRW)
+                    # 여기서 매도금액 환산은 '현재 환율'이 아닌 '매도 시점 환율'이 맞으나, 
+                    # 예수금 관점에서는 현재 보유한 달러의 가치(current_avg_rate)로 평가
+                    sell_val_krw = amount * current_avg_rate 
                     
                     pl_krw = sell_val_krw - cost_krw
                     portfolio[ticker]['realized_krw'] += pl_krw
@@ -227,7 +253,86 @@ def process_timeline(df_trade, df_money):
     return df_trade, df_money, current_balance, current_avg_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Main App
+# [5] Helper: 카톡 파싱 (Old Code 스타일의 확실한 파싱)
+# -------------------------------------------------------------------
+def parse_kakaotalk_final(text, base_date):
+    parsed_list = []
+    base_year = base_date.year
+    
+    # 텍스트 전체를 줄바꿈 없이 하나로 뭉쳐서 처리 (끊긴 메시지 대응)
+    lines = text.split('\n')
+    full_text = "\n".join([l.strip() for l in lines if l.strip()])
+
+    # 1. 매매 파싱 (체결안내)
+    blocks = re.split(r'\[한국투자증권 체결안내\]', full_text)
+    
+    for block in blocks:
+        if not block: continue
+        
+        # 시간 추출
+        time_match = re.match(r'(\d{2}:\d{2})', block)
+        time_str = time_match.group(1) if time_match else "00:00"
+        
+        type_m = re.search(r'\*매매구분:(매수|매도)', block)
+        name_m = re.search(r'\*종목명:([A-Za-z0-9 ]+)(?:/|$)', block)
+        qty_m = re.search(r'\*체결수량:(\d+)', block)
+        price_m = re.search(r'\*체결단가:USD\s*([\d.]+)', block)
+        
+        if type_m and name_m and qty_m and price_m:
+            # 시간 보정: 전날 23:30
+            trade_dt = datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)
+            final_dt = trade_dt.strftime("%Y-%m-%d 23:30:00")
+            
+            parsed_list.append({
+                "Category": "Trade",
+                "Date": final_dt,
+                "Ticker": name_m.group(1).strip(),
+                "Type": "Buy" if type_m.group(1) == "매수" else "Sell",
+                "Qty": int(qty_m.group(1)),
+                "Price": float(price_m.group(1)),
+                "Amount_KRW": 0,
+                "Memo": "카톡파싱"
+            })
+
+    # 2. 배당 파싱
+    div_pattern = re.compile(r'최원준님\s*(\d{2}/\d{2}).*?([A-Z]+)/.*?USD\s*([\d.]+)\s*세전배당입금', re.DOTALL)
+    for match in div_pattern.finditer(full_text):
+        date_part, ticker, amount = match.groups()
+        m, d = map(int, date_part.split('/'))
+        div_dt = datetime(base_year, m, d, 15, 0, 0)
+        
+        parsed_list.append({
+            "Category": "Dividend",
+            "Date": div_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "Ticker": ticker.strip(),
+            "Type": "Dividend",
+            "Qty": 0,
+            "Price": float(amount),
+            "Amount_KRW": 0,
+            "Memo": "카톡파싱"
+        })
+
+    # 3. 환전 파싱
+    exch_pattern = re.compile(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?USD\s*([0-9,.]+)', re.DOTALL)
+    for match in exch_pattern.finditer(full_text):
+        krw_str, rate_str, usd_str = match.groups()
+        exch_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0)
+        
+        parsed_list.append({
+            "Category": "Exchange",
+            "Date": exch_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "Ticker": "-",
+            "Type": "KRW_to_USD",
+            "Qty": 0,
+            "Price": float(usd_str.replace(',', '')), 
+            "Amount_KRW": float(krw_str.replace(',', '')),
+            "Memo": "카톡파싱"
+        })
+        
+    return pd.DataFrame(parsed_list)
+
+# -------------------------------------------------------------------
+# [6] Main App
 # -------------------------------------------------------------------
 def main():
     try:
@@ -236,16 +341,16 @@ def main():
         st.error("DB 연결 실패.")
         st.stop()
         
+    # 엔진 실행 (오류 수정됨)
     u_trade, u_money, cur_bal, cur_rate, portfolio = process_timeline(df_trade, df_money)
     cur_real_rate = get_realtime_rate()
     
-    # [시세 조회 캐싱] - 화면 깜빡임 방지 Logic
+    # [시세 조회 캐싱]
     tickers = list(portfolio.keys())
     if tickers:
-        # 캐시가 비어있거나, 종목이 추가되었을 때만 API 호출
         uncached = [t for t in tickers if t not in st.session_state['price_cache']]
         if uncached:
-            with st.spinner("데이터 동기화 중..."):
+            with st.spinner("최신 시세 조회 중..."):
                 for t in uncached:
                     st.session_state['price_cache'][t] = kis.get_current_price(t)
         prices = st.session_state['price_cache']
@@ -277,9 +382,8 @@ def main():
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
     with c2:
-        # [수동 새로고침 버튼]
         if st.button("🔄 시세/데이터 새로고침"):
-            st.session_state['price_cache'] = {} # 캐시 초기화
+            st.session_state['price_cache'] = {}
             if 'fx_rate' in st.session_state: del st.session_state['fx_rate']
             st.cache_resource.clear()
             st.rerun()
@@ -310,7 +414,7 @@ def main():
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] Dashboard (Card View + Detail Restore)
+    # [Tab 1] Dashboard
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -439,7 +543,7 @@ def main():
         st.dataframe(u_money[['Date', 'Type', 'USD_Amount', 'KRW_Amount', 'Note']].fillna(''), use_container_width=True)
 
     # ---------------------------------------------------------
-    # [Tab 4] Input Manager (1월 28일 구버전 로직 부활)
+    # [Tab 4] Input Manager (저장 로직 Fix)
     # ---------------------------------------------------------
     with tab4:
         st.subheader("📝 입출금 및 배당 관리")
@@ -455,13 +559,11 @@ def main():
             
             raw_text = st.text_area("카톡 내용 붙여넣기", height=200, placeholder="[한국투자증권 체결안내]08:05\n...")
             
-            # [구버전 스타일 복구] : 분석 과정을 거치지 않고 바로 쏘는 버튼 하나만 존재
             if st.button("🚀 저장하기 (분석 및 DB전송)", type="primary"):
                 if raw_text:
                     ws_trade = sheet_instance.worksheet("Trade_Log")
                     ws_money = sheet_instance.worksheet("Money_Log")
                     
-                    # Max ID 계산
                     max_id = max(pd.to_numeric(u_trade['Order_ID']).max(), pd.to_numeric(u_money['Order_ID']).max())
                     next_id = int(max_id) + 1
                     
@@ -471,13 +573,11 @@ def main():
                     # 텍스트 전처리
                     full_text = raw_text.replace('\r', '')
                     
-                    # 1. 매수/매도 파싱 (구버전 로직 + 시간보정)
-                    # 구버전처럼 split 활용하되, 정규식으로 안전하게 추출
+                    # 1. 매수/매도 파싱
                     trade_blocks = re.split(r'\[한국투자증권 체결안내\]', full_text)
                     for block in trade_blocks:
                         if "종목명" not in block: continue
                         try:
-                            # 시간 추출 (블록 맨 앞)
                             time_match = re.match(r'(\d{2}:\d{2})', block.strip())
                             time_str = time_match.group(1) if time_match else "00:00"
                             
@@ -487,13 +587,10 @@ def main():
                             price_m = re.search(r'\*체결단가:USD\s*([\d.]+)', block)
                             
                             if type_m and name_m and qty_m and price_m:
-                                # 시간 보정: 전날 23:30
                                 trade_dt = datetime.combine(ref_date, datetime.min.time()) - timedelta(days=1)
                                 final_dt = trade_dt.strftime("%Y-%m-%d 23:30:00")
-                                
                                 t_type = "Buy" if type_m.group(1) == "매수" else "Sell"
                                 
-                                # [중요] Python Native Type으로 변환하여 저장
                                 ws_trade.append_row([
                                     str(final_dt),
                                     int(next_id),
@@ -515,14 +612,14 @@ def main():
                         try:
                             date_part, ticker, amount = match.groups()
                             m, d = map(int, date_part.split('/'))
-                            div_dt = datetime(base_year, m, d, 15, 0, 0) # 오후 3시
+                            div_dt = datetime(base_year, m, d, 15, 0, 0)
                             
                             ws_money.append_row([
                                 div_dt.strftime("%Y-%m-%d %H:%M:%S"),
                                 int(next_id),
                                 "Dividend",
                                 str(ticker.strip()),
-                                0, # KRW
+                                0, 
                                 float(amount),
                                 0, "", "", "카톡파싱_배당"
                             ])
@@ -535,7 +632,7 @@ def main():
                     for match in exch_pattern.finditer(full_text):
                         try:
                             krw_str, rate_str, usd_str = match.groups()
-                            exch_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=14, minute=0) # 오후 2시
+                            exch_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=14, minute=0)
                             
                             ws_money.append_row([
                                 exch_dt.strftime("%Y-%m-%d %H:%M:%S"),
