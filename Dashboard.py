@@ -9,7 +9,7 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 스타일 (기존 UI 유지)
+# [1] 설정 & 스타일
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
@@ -35,13 +35,6 @@ st.markdown(f"""
     header {{visibility: hidden;}}
     .block-container {{ padding-top: 1.5rem; }}
     
-    /* KPI */
-    .kpi-container {{ display: grid; grid-template-columns: 2fr 1.5fr 1.5fr; gap: 16px; margin-bottom: 24px; }}
-    .kpi-card {{ background-color: {THEME_CARD}; padding: 24px; border-radius: 16px; border: 1px solid {THEME_BORDER}; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }}
-    .kpi-title {{ font-size: 0.95rem; color: {THEME_SUB}; margin-bottom: 8px; font-weight: 500; }}
-    .kpi-main {{ font-size: 2.2rem; font-weight: 800; color: {THEME_TEXT}; letter-spacing: -0.5px; }}
-    .kpi-sub {{ font-size: 1.1rem; margin-top: 8px; font-weight: 600; color: {THEME_SUB}; }}
-    
     /* Utilities */
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
@@ -49,7 +42,7 @@ st.markdown(f"""
     .bg-red {{ background-color: {COLOR_BG_RED} !important; }}
     .bg-blue {{ background-color: {COLOR_BG_BLUE} !important; }}
     
-    /* Cards */
+    /* Cards (KPI에도 동일 적용) */
     .stock-card {{ background-color: {THEME_CARD}; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid {THEME_BORDER}; border-left: 6px solid #555; transition: transform 0.2s, box-shadow 0.2s; }}
     .stock-card:hover {{ transform: translateY(-4px); box-shadow: 0 6px 12px rgba(0,0,0,0.4); }}
     .card-up {{ border-left-color: {COLOR_RED} !important; }}
@@ -145,7 +138,7 @@ def get_realtime_rate():
     except: return 1450.0
 
 # -------------------------------------------------------------------
-# [4] 엔진: 달러 저수지 & 포트폴리오 계산 (날짜/시간 정밀 처리 수정)
+# [4] 엔진: 달러 저수지 & 포트폴리오 계산
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money):
     df_money['Source'] = 'Money'
@@ -154,26 +147,25 @@ def process_timeline(df_trade, df_money):
     if 'Order_ID' not in df_money.columns: df_money['Order_ID'] = 0
     if 'Order_ID' not in df_trade.columns: df_trade['Order_ID'] = 0
     
-    # [수정됨] 날짜 처리 로직 강화: 시간 데이터를 버리지 않고 모두 살림
-    # to_datetime을 사용하여 '2025-12-31'은 '2025-12-31 00:00:00'으로,
-    # '2026-02-06 15:30:00'은 그대로 유지하여 시간순 정렬 가능하게 함.
+    # 날짜 처리 강화
     try:
         df_money['Date_Obj'] = pd.to_datetime(df_money['Date'].astype(str))
         df_trade['Date_Obj'] = pd.to_datetime(df_trade['Date'].astype(str))
     except Exception as e:
-        # 혹시라도 실패하면, 로그를 남기고 가능한 부분만 처리 (비상용)
-        # 하지만 위 코드는 대부분의 형식을 자동으로 처리합니다.
         st.error(f"날짜 변환 중 오류 발생: {e}")
         return df_trade, df_money, 0, 0, {}
 
     timeline = pd.concat([df_money, df_trade], ignore_index=True)
     timeline['Order_ID'] = pd.to_numeric(timeline['Order_ID'], errors='coerce').fillna(999999)
-    
-    # [정렬 기준] 날짜(시간포함) -> Order_ID 순서로 정렬
     timeline = timeline.sort_values(by=['Date_Obj', 'Order_ID'])
     
     current_balance = 0.0
     current_avg_rate = 0.0
+    
+    # [NEW] 순수 환전 환율 계산용 변수
+    pure_exch_krw_sum = 0.0
+    pure_exch_usd_sum = 0.0
+    
     portfolio = {} 
     
     for idx, row in timeline.iterrows():
@@ -186,7 +178,7 @@ def process_timeline(df_trade, df_money):
             ticker = str(row.get('Ticker', '')).strip()
             if ticker == '' or ticker == '-' or ticker == 'nan': ticker = 'Cash'
             
-            # 배당: 평단 희석
+            # 배당
             if 'dividend' in t_type or '배당' in t_type:
                 if ticker != 'Cash':
                     if ticker not in portfolio: 
@@ -196,10 +188,15 @@ def process_timeline(df_trade, df_money):
                 if current_balance + usd_amt > 0:
                     current_avg_rate = (current_balance * current_avg_rate) / (current_balance + usd_amt)
             
-            # 환전(입금): 평단 갱신
+            # 환전(입금)
             else:
                 if current_balance + usd_amt > 0:
                     current_avg_rate = ((current_balance * current_avg_rate) + krw_amt) / (current_balance + usd_amt)
+                
+                # 순수 환전 누적 (KRW_to_USD 인 경우만)
+                if 'krw_to_usd' in t_type or '환전' in t_type:
+                    pure_exch_krw_sum += krw_amt
+                    pure_exch_usd_sum += usd_amt
             
             current_balance += usd_amt
 
@@ -237,87 +234,72 @@ def process_timeline(df_trade, df_money):
                     portfolio[ticker]['invested_krw'] -= cost_krw
                     portfolio[ticker]['invested_usd'] -= cost_usd
 
-    return df_trade, df_money, current_balance, current_avg_rate, portfolio
+    # 순수 환전 환율 계산
+    pure_exch_rate = pure_exch_krw_sum / pure_exch_usd_sum if pure_exch_usd_sum > 0 else 0
+
+    return df_trade, df_money, current_balance, current_avg_rate, pure_exch_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Helper: 카톡 파싱 (정밀 시간 처리)
+# [5] Helper: 카톡 파싱
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
     base_year = base_date.year
-    
-    # 텍스트 전체를 줄바꿈 없이 하나로 뭉쳐서 처리 (끊긴 메시지 대응)
     lines = text.split('\n')
     full_text = "\n".join([l.strip() for l in lines if l.strip()])
 
-    # 1. 매매 파싱 (체결안내)
-    # 정규식으로 블록 분리
+    # 1. 매매 파싱
     blocks = re.split(r'\[한국투자증권 체결안내\]', full_text)
-    
     for block in blocks:
         if not block: continue
-        
-        # 시간 추출
-        time_match = re.match(r'(\d{2}:\d{2})', block)
-        time_str = time_match.group(1) if time_match else "00:00"
-        
-        type_m = re.search(r'\*매매구분:(매수|매도)', block)
-        name_m = re.search(r'\*종목명:([A-Za-z0-9 ]+)(?:/|$)', block)
-        qty_m = re.search(r'\*체결수량:(\d+)', block)
-        price_m = re.search(r'\*체결단가:USD\s*([\d.]+)', block)
-        
-        if type_m and name_m and qty_m and price_m:
-            # 시간 보정: 카톡 수신일(base_date) 기준 전날 23:30으로 설정
-            trade_dt = datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)
-            final_dt = trade_dt.strftime("%Y-%m-%d 23:30:00")
+        try:
+            time_match = re.match(r'(\d{2}:\d{2})', block.strip())
+            time_str = time_match.group(1) if time_match else "00:00"
             
-            parsed_list.append({
-                "Category": "Trade",
-                "Date": final_dt,
-                "Ticker": name_m.group(1).strip(),
-                "Type": "Buy" if type_m.group(1) == "매수" else "Sell",
-                "Qty": int(qty_m.group(1)),
-                "Price": float(price_m.group(1)),
-                "Amount_KRW": 0,
-                "Memo": "카톡파싱"
-            })
+            type_m = re.search(r'\*매매구분:(매수|매도)', block)
+            name_m = re.search(r'\*종목명:([A-Za-z0-9 ]+)(?:/|$)', block)
+            qty_m = re.search(r'\*체결수량:(\d+)', block)
+            price_m = re.search(r'\*체결단가:USD\s*([\d.]+)', block)
+            
+            if type_m and name_m and qty_m and price_m:
+                trade_dt = datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)
+                final_dt = trade_dt.strftime("%Y-%m-%d 23:30:00")
+                parsed_list.append({
+                    "Category": "Trade", "Date": final_dt,
+                    "Ticker": name_m.group(1).strip(),
+                    "Type": "Buy" if type_m.group(1) == "매수" else "Sell",
+                    "Qty": int(qty_m.group(1)), "Price": float(price_m.group(1)),
+                    "Amount_KRW": 0, "Memo": "카톡파싱"
+                })
+        except: continue
 
     # 2. 배당 파싱
     div_pattern = re.compile(r'최원준님\s*(\d{2}/\d{2}).*?([A-Z]+)/.*?USD\s*([\d.]+)\s*세전배당입금', re.DOTALL)
     for match in div_pattern.finditer(full_text):
-        date_part, ticker, amount = match.groups()
-        m, d = map(int, date_part.split('/'))
-        # 배당은 당일 오후 3시 (15:00)
-        div_dt = datetime(base_year, m, d, 15, 0, 0)
-        
-        parsed_list.append({
-            "Category": "Dividend",
-            "Date": div_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "Ticker": ticker.strip(),
-            "Type": "Dividend",
-            "Qty": 0,
-            "Price": float(amount),
-            "Amount_KRW": 0,
-            "Memo": "카톡파싱"
-        })
+        try:
+            date_part, ticker, amount = match.groups()
+            m, d = map(int, date_part.split('/'))
+            div_dt = datetime(base_year, m, d, 15, 0, 0)
+            parsed_list.append({
+                "Category": "Dividend", "Date": div_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "Ticker": ticker.strip(), "Type": "Dividend",
+                "Qty": 0, "Price": float(amount), "Amount_KRW": 0, "Memo": "카톡파싱"
+            })
+        except: continue
 
     # 3. 환전 파싱
     exch_pattern = re.compile(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?USD\s*([0-9,.]+)', re.DOTALL)
     for match in exch_pattern.finditer(full_text):
-        krw_str, rate_str, usd_str = match.groups()
-        # 환전은 당일 오후 2시 (14:00)
-        exch_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0)
-        
-        parsed_list.append({
-            "Category": "Exchange",
-            "Date": exch_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "Ticker": "-",
-            "Type": "KRW_to_USD",
-            "Qty": 0,
-            "Price": float(usd_str.replace(',', '')), 
-            "Amount_KRW": float(krw_str.replace(',', '')),
-            "Memo": "카톡파싱"
-        })
+        try:
+            krw_str, rate_str, usd_str = match.groups()
+            exch_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0)
+            parsed_list.append({
+                "Category": "Exchange", "Date": exch_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "Ticker": "-", "Type": "KRW_to_USD",
+                "Qty": 0, "Price": float(usd_str.replace(',', '')), 
+                "Amount_KRW": float(krw_str.replace(',', '')), "Memo": "카톡파싱"
+            })
+        except: continue
         
     return pd.DataFrame(parsed_list)
 
@@ -331,8 +313,7 @@ def main():
         st.error("DB 연결 실패.")
         st.stop()
         
-    # 엔진 실행 (시간 포함 정렬)
-    u_trade, u_money, cur_bal, cur_rate, portfolio = process_timeline(df_trade, df_money)
+    u_trade, u_money, cur_bal, cur_rate, pure_exch_rate, portfolio = process_timeline(df_trade, df_money)
     cur_real_rate = get_realtime_rate()
     
     # [시세 조회 캐싱]
@@ -347,23 +328,46 @@ def main():
     else:
         prices = {}
     
-    # KPI Logic
+    # --- KPI Logic Aggregation ---
     total_stock_val_krw = 0.0
     total_input_principal = df_money[df_money['Type'] == 'KRW_to_USD']['KRW_Amount'].apply(safe_float).sum()
+    
+    total_realized_krw = sum(d['realized_krw'] for d in portfolio.values())
+    total_div_usd = sum(d['accum_div_usd'] for d in portfolio.values())
+    total_div_krw = total_div_usd * cur_real_rate # 단순 환산
+    
+    total_price_profit = 0
+    total_fx_profit = 0
     
     for tk, data in portfolio.items():
         if data['qty'] > 0:
             val_usd = data['qty'] * prices.get(tk, 0)
-            total_stock_val_krw += (val_usd * cur_real_rate)
+            val_krw = val_usd * cur_real_rate
+            
+            invested_krw = data['invested_krw']
+            invested_usd = data['invested_usd']
+            
+            # 종목별 환차익 & 주가차익
+            avg_rate_tk = invested_krw / invested_usd if invested_usd > 0 else 0
+            fx_p = invested_usd * (cur_real_rate - avg_rate_tk)
+            price_p = (val_usd - invested_usd) * cur_real_rate
+            
+            total_stock_val_krw += val_krw
+            total_price_profit += price_p
+            total_fx_profit += fx_p
 
-    total_asset_krw = total_stock_val_krw + (cur_bal * cur_real_rate)
+    # 현금 보유분의 환차익 계산
+    cash_val_krw = cur_bal * cur_real_rate
+    cash_invested_krw = cur_bal * cur_rate # 매수평단 기준 원금
+    cash_fx_profit = cash_val_krw - cash_invested_krw
+    total_fx_profit += cash_fx_profit
+
+    total_asset_krw = total_stock_val_krw + cash_val_krw
     total_pl_krw = total_asset_krw - total_input_principal
     total_pl_pct = (total_pl_krw / total_input_principal * 100) if total_input_principal > 0 else 0
     
-    total_realized_krw = sum(d['realized_krw'] for d in portfolio.values())
-    total_div_usd = sum(d['accum_div_usd'] for d in portfolio.values())
-    
-    bep_numerator = total_input_principal - total_realized_krw - (total_div_usd * cur_real_rate)
+    # BEP & Safety Margin
+    bep_numerator = total_input_principal - total_realized_krw - total_div_krw
     total_usd_assets = (total_stock_val_krw / cur_real_rate) + cur_bal
     bep_rate = bep_numerator / total_usd_assets if total_usd_assets > 0 else 0
     safety_margin = cur_real_rate - bep_rate
@@ -378,33 +382,74 @@ def main():
             st.cache_resource.clear()
             st.rerun()
 
-    # KPI UI
-    st.markdown(f"""
-    <div class="kpi-container">
-        <div class="kpi-card">
-            <div class="kpi-title">총 자산 (Total Assets)</div>
-            <div class="kpi-main">₩ {total_asset_krw:,.0f}</div>
-            <div class="kpi-sub {'txt-red' if total_pl_krw >= 0 else 'txt-blue'}">
-                {'▲' if total_pl_krw >= 0 else '▼'} {abs(total_pl_krw):,.0f} &nbsp; {total_pl_pct:+.2f}%
+    # ------------------------------------------------------------------
+    # [NEW KPI Section] 카드 스타일 적용 (3열 Grid -> Mobile Stack)
+    # ------------------------------------------------------------------
+    kpi_cols = st.columns(3)
+    
+    # 1. 총 자산 카드
+    with kpi_cols[0]:
+        is_plus = total_pl_krw >= 0
+        cls = "card-up" if is_plus else "card-down"
+        txt = "txt-red" if is_plus else "txt-blue"
+        arrow = "▲" if is_plus else "▼"
+        
+        st.markdown(f"""
+        <div class="stock-card {cls}">
+            <div class="card-header"><span class="card-ticker">총 자산</span><span class="card-price">Total Assets</span></div>
+            <div class="card-main-val">₩ {total_asset_krw:,.0f}</div>
+            <div class="card-sub-box {txt}">
+                {arrow} {abs(total_pl_krw):,.0f} ({total_pl_pct:+.2f}%)
+            </div>
+            <details>
+                <summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer; margin-top:5px;">상세 손익 내역</summary>
+                <table class="detail-table" style="width:100%; font-size:0.85rem; color:#ccc;">
+                    <tr><td>평가손익</td><td style="text-align:right;">₩ {total_price_profit:,.0f}</td></tr>
+                    <tr><td>환차익</td><td style="text-align:right;">₩ {total_fx_profit:,.0f}</td></tr>
+                    <tr><td>실현손익</td><td style="text-align:right;">₩ {total_realized_krw:,.0f}</td></tr>
+                    <tr><td>배당수익</td><td style="text-align:right;">₩ {total_div_krw:,.0f}</td></tr>
+                </table>
+            </details>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 2. 달러 잔고 카드
+    with kpi_cols[1]:
+        st.markdown(f"""
+        <div class="stock-card">
+            <div class="card-header"><span class="card-ticker">달러 잔고</span><span class="card-price">USD Balance</span></div>
+            <div class="card-main-val">$ {cur_bal:,.2f}</div>
+            <div class="card-sub-box">
+                <span style="font-size:0.9rem; color:#888;">매수평단 ₩ {cur_rate:,.2f}</span>
+            </div>
+            <div style="text-align:right; margin-top:4px;">
+                <span style="font-size:0.8rem; color:#666;">(순수환전 ₩ {pure_exch_rate:,.2f})</span>
             </div>
         </div>
-        <div class="kpi-card">
-            <div class="kpi-title">달러 잔고 (USD Balance)</div>
-            <div class="kpi-main">$ {cur_bal:,.2f}</div>
-            <div class="kpi-sub">매수환율: ₩ {cur_rate:,.2f}</div>
+        """, unsafe_allow_html=True)
+
+    # 3. 안전마진 카드
+    with kpi_cols[2]:
+        margin_cls = "txt-red" if safety_margin >= 0 else "txt-blue"
+        margin_arrow = "+" if safety_margin >= 0 else ""
+        
+        st.markdown(f"""
+        <div class="stock-card {cls if safety_margin >= 0 else 'card-down'}">
+            <div class="card-header"><span class="card-ticker">안전마진</span><span class="card-price">Safety Margin</span></div>
+            <div class="card-main-val {margin_cls}">{margin_arrow}{safety_margin:,.2f} 원</div>
+            <div class="card-sub-box">
+                <span style="font-size:0.9rem; color:#888;">BEP ₩ {bep_rate:,.2f}</span>
+            </div>
+            <div style="text-align:right; margin-top:4px;">
+                <span style="font-size:0.8rem; color:#FF9800;">시장환율 ₩ {cur_real_rate:,.2f}</span>
+            </div>
         </div>
-        <div class="kpi-card">
-            <div class="kpi-title">안전마진 (Safety Margin)</div>
-            <div class="kpi-main {'txt-red' if safety_margin >= 0 else 'txt-blue'}">{safety_margin:+.2f} 원</div>
-            <div class="kpi-sub">BEP: ₩ {bep_rate:,.2f}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
+        """, unsafe_allow_html=True)
+
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] Dashboard (Card View + Detail Restore)
+    # [Tab 1] Dashboard (Card View)
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -533,7 +578,7 @@ def main():
         st.dataframe(u_money[['Date', 'Type', 'USD_Amount', 'KRW_Amount', 'Note']].fillna(''), use_container_width=True)
 
     # ---------------------------------------------------------
-    # [Tab 4] Input Manager (1월 28일 구버전 로직 부활)
+    # [Tab 4] Input Manager (1월 28일 구버전 로직 유지)
     # ---------------------------------------------------------
     with tab4:
         st.subheader("📝 입출금 및 배당 관리")
