@@ -80,6 +80,9 @@ DOMESTIC_TICKER_MAP = {
 # -------------------------------------------------------------------
 # [3] 유틸리티 & 데이터 로드
 # -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# [3] 유틸리티 & 데이터 로드 (데이터 0건 에러 완벽 방어)
+# -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -95,30 +98,41 @@ def safe_float(val):
 def load_data():
     client = get_gsheet_client()
     sh = client.open("Investment_Dashboard_DB")
-    df_money = pd.DataFrame(sh.worksheet("Money_Log").get_all_records())
-    df_trade = pd.DataFrame(sh.worksheet("Trade_Log").get_all_records())
     
-    # [NEW] 국내 원장 로드 (없으면 빈 DF 생성)
-    try:
-        df_domestic = pd.DataFrame(sh.worksheet("Domestic_Log").get_all_records())
-    except:
-        df_domestic = pd.DataFrame(columns=['Date', 'Type', 'Ticker', 'Name', 'Qty', 'Price_KRW', 'Amount_KRW', 'Note'])
-    
-    df_money.columns = df_money.columns.str.strip()
-    df_trade.columns = df_trade.columns.str.strip()
-    df_domestic.columns = df_domestic.columns.str.strip()
+    # [안전하게 시트를 불러오는 헬퍼 함수]
+    def get_safe_df(sheet_name, default_columns):
+        try:
+            ws = sh.worksheet(sheet_name)
+            records = ws.get_all_records()
+            if not records:
+                # 데이터가 0건(헤더만 있는 경우)일 때 빈 깡통 에러 방지
+                return pd.DataFrame(columns=default_columns)
+            df = pd.DataFrame(records)
+            # 컬럼명이 숫자로 잡히는 경우를 대비해 문자로 강제 변환 후 공백 제거
+            df.columns = df.columns.astype(str).str.strip()
+            return df
+        except Exception:
+            return pd.DataFrame(columns=default_columns)
 
+    df_trade = get_safe_df("Trade_Log", ['Date', 'Order_ID', 'Ticker', 'Name', 'Type', 'Qty', 'Price_USD', 'Ex_Avg_Rate', 'Note', 'Source'])
+    df_money = get_safe_df("Money_Log", ['Date', 'Order_ID', 'Type', 'Ticker', 'KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance', 'Note', 'Source'])
+    df_domestic = get_safe_df("Domestic_Log", ['Date', 'Type', 'Ticker', 'Name', 'Qty', 'Price_KRW', 'Amount_KRW', 'Note'])
+
+    # 금액 컬럼 쉼표(,) 제거 및 숫자 변환
     cols_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
     for c in cols_money:
-        if c in df_money.columns: df_money[c] = pd.to_numeric(df_money[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        if c in df_money.columns: 
+            df_money[c] = pd.to_numeric(df_money[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             
     cols_trade = ['Qty', 'Price_USD', 'Ex_Avg_Rate']
     for c in cols_trade:
-        if c in df_trade.columns: df_trade[c] = pd.to_numeric(df_trade[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        if c in df_trade.columns: 
+            df_trade[c] = pd.to_numeric(df_trade[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
     cols_dom = ['Qty', 'Price_KRW', 'Amount_KRW']
     for c in cols_dom:
-        if c in df_domestic.columns: df_domestic[c] = pd.to_numeric(df_domestic[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        if c in df_domestic.columns: 
+            df_domestic[c] = pd.to_numeric(df_domestic[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
     return df_trade, df_money, df_domestic, sh
 
