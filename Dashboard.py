@@ -321,11 +321,16 @@ def parse_kakaotalk_final(text, base_date):
 # -------------------------------------------------------------------
 # [6] Main App
 # -------------------------------------------------------------------
+# -------------------------------------------------------------------
+# [6] Main App
+# -------------------------------------------------------------------
 def main():
     try:
         df_trade, df_money, df_domestic, sheet_instance = load_data()
-    except:
-        st.error("DB 연결 실패.")
+    except Exception as e:
+        # [수정] 진짜 에러 메시지를 화면에 출력하도록 변경
+        st.error(f"🚨 DB 연결/로딩 실패 상세 원인: {e}")
+        st.info("💡 팁: 구글 시트의 탭 이름(Money_Log, Trade_Log, Domestic_Log)이 일치하는지 확인하세요.")
         st.stop()
         
     u_trade, u_money, cur_bal, dom_cash, cur_rate, pure_exch_rate, portfolio = process_timeline(df_trade, df_money, df_domestic)
