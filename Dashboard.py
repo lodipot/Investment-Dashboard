@@ -250,7 +250,7 @@ def process_timeline(df_trade, df_money, df_domestic):
             domestic_cash -= amount_krw
 
     pure_exch_rate = pure_exch_krw_sum / pure_exch_usd_sum if pure_exch_usd_sum > 0 else 0
-    return u_trade, u_money, current_balance, domestic_cash, current_avg_rate, pure_exch_rate, portfolio
+    return df_trade, df_money, current_balance, domestic_cash, current_avg_rate, pure_exch_rate, portfolio
 
 # -------------------------------------------------------------------
 # [5] Helper: 카톡 파싱 (국내 주식 분기 추가)
