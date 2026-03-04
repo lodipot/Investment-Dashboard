@@ -78,10 +78,7 @@ DOMESTIC_TICKER_MAP = {
 }
 
 # -------------------------------------------------------------------
-# [3] 유틸리티 & 데이터 로드
-# -------------------------------------------------------------------
-# -------------------------------------------------------------------
-# [3] 유틸리티 & 데이터 로드 (데이터 0건 에러 완벽 방어)
+# [3] 유틸리티 & 데이터 로드 (0건 에러 방지 포함)
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -99,16 +96,13 @@ def load_data():
     client = get_gsheet_client()
     sh = client.open("Investment_Dashboard_DB")
     
-    # [안전하게 시트를 불러오는 헬퍼 함수]
     def get_safe_df(sheet_name, default_columns):
         try:
             ws = sh.worksheet(sheet_name)
             records = ws.get_all_records()
             if not records:
-                # 데이터가 0건(헤더만 있는 경우)일 때 빈 깡통 에러 방지
                 return pd.DataFrame(columns=default_columns)
             df = pd.DataFrame(records)
-            # 컬럼명이 숫자로 잡히는 경우를 대비해 문자로 강제 변환 후 공백 제거
             df.columns = df.columns.astype(str).str.strip()
             return df
         except Exception:
@@ -118,7 +112,6 @@ def load_data():
     df_money = get_safe_df("Money_Log", ['Date', 'Order_ID', 'Type', 'Ticker', 'KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance', 'Note', 'Source'])
     df_domestic = get_safe_df("Domestic_Log", ['Date', 'Type', 'Ticker', 'Name', 'Qty', 'Price_KRW', 'Amount_KRW', 'Note'])
 
-    # 금액 컬럼 쉼표(,) 제거 및 숫자 변환
     cols_money = ['KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance']
     for c in cols_money:
         if c in df_money.columns: 
@@ -148,7 +141,7 @@ def get_realtime_rate():
 # [4] 엔진: 달러 저수지 & 원화 자산 통합 프로세싱
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money, df_domestic):
-    # 1. 달러 저수지 처리 (기존 로직 동일)
+    # 1. 달러 저수지 처리
     df_money['Source'] = 'Money'
     df_trade['Source'] = 'Trade'
     
@@ -169,7 +162,6 @@ def process_timeline(df_trade, df_money, df_domestic):
     
     portfolio = {} 
     
-    # 달러 타임라인 처리
     for idx, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
@@ -217,12 +209,12 @@ def process_timeline(df_trade, df_money, df_domestic):
                     portfolio[ticker]['invested_krw'] -= (qty * unit_krw)
                     portfolio[ticker]['invested_usd'] -= (qty * unit_usd)
 
-    # 2. 원화 자산(Domestic_Log) 처리 [NEW]
+    # 2. 원화 자산(Domestic_Log) 처리
     domestic_cash = 0.0
     for idx, row in df_domestic.iterrows():
         t_type = str(row.get('Type', '')).lower()
         raw_ticker = str(row.get('Ticker', '')).strip()
-        ticker = DOMESTIC_TICKER_MAP.get(raw_ticker, raw_ticker) # UI 표시용 티커 맵핑
+        ticker = DOMESTIC_TICKER_MAP.get(raw_ticker, raw_ticker) 
         
         qty = safe_float(row.get('Qty'))
         amount_krw = safe_float(row.get('Amount_KRW'))
@@ -242,7 +234,8 @@ def process_timeline(df_trade, df_money, df_domestic):
                 portfolio[ticker]['invested_krw'] -= (qty * unit_krw)
             domestic_cash += amount_krw
         elif 'dividend' in t_type or '배당' in t_type:
-            portfolio[ticker]['accum_div_krw'] += amount_krw
+            if ticker in portfolio:
+                portfolio[ticker]['accum_div_krw'] += amount_krw
             domestic_cash += amount_krw
         elif 'deposit' in t_type or '입금' in t_type:
             domestic_cash += amount_krw
@@ -253,7 +246,7 @@ def process_timeline(df_trade, df_money, df_domestic):
     return df_trade, df_money, current_balance, domestic_cash, current_avg_rate, pure_exch_rate, portfolio
 
 # -------------------------------------------------------------------
-# [5] Helper: 카톡 파싱 (국내 주식 분기 추가)
+# [5] Helper: 카톡 파싱 (국내 주식 분기 및 K-ETF 배당 추가)
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -269,14 +262,13 @@ def parse_kakaotalk_final(text, base_date):
             time_match = re.match(r'(\d{2}:\d{2})', block.strip())
             time_str = time_match.group(1) if time_match else "00:00"
             
-            # K-ETF(국내) 매수 패턴: *매매구분:현금매수체결, *종목명:TIGER...(458730), *체결단가:14,575원
+            # K-ETF(국내) 매수 패턴
             dom_buy = re.search(r'\*매매구분:현금(매수|매도)체결', block)
             dom_name = re.search(r'\*종목명:.*?\(([\dA-Za-z]+)\)', block)
             dom_qty = re.search(r'\*체결수량:([\d,]+)', block)
             dom_price = re.search(r'\*체결단가:([\d,]+)원', block)
             
             if dom_buy and dom_name and dom_qty and dom_price:
-                # 국내 주식은 당일 시간 그대로 적용 가능
                 t_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=int(time_str.split(':')[0]), minute=int(time_str.split(':')[1]))
                 t_type = "Buy" if dom_buy.group(1) == "매수" else "Sell"
                 parsed_list.append({
@@ -284,7 +276,7 @@ def parse_kakaotalk_final(text, base_date):
                     "Ticker": dom_name.group(1), "Name": "-", "Type": t_type,
                     "Qty": int(dom_qty.group(1).replace(',','')), "Price": float(dom_price.group(1).replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{time_str}"
                 })
-                continue # 국내 처리했으면 해외 정규식 패스
+                continue 
             
             # 해외 매수 패턴
             type_m = re.search(r'\*매매구분:(매수|매도)', block)
@@ -302,7 +294,7 @@ def parse_kakaotalk_final(text, base_date):
                 })
         except: continue
 
-    # 2. 배당 파싱 (국내 배당 추가 가능하도록 추후 확장 대비, 현재는 해외 위주)
+    # 2. 해외 배당 파싱
     div_pattern = re.compile(r'최원준님\s*(\d{2}/\d{2}).*?([A-Z]+)/.*?USD\s*([\d.]+)\s*세전배당입금', re.DOTALL)
     for match in div_pattern.finditer(full_text):
         try:
@@ -313,6 +305,46 @@ def parse_kakaotalk_final(text, base_date):
                 "Category": "Dividend", "Date": div_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "Ticker": ticker.strip(), "Type": "Dividend",
                 "Qty": 0, "Price": float(amount), "Amount": 0, "Memo": "카톡파싱_배당"
+            })
+        except: continue
+
+    # [NEW] 2.5 국내 ETF 배당 파싱
+    dom_div_pattern = re.compile(
+        r'ETF 결산분배금 입금 안내.*?'
+        r'\*\s*종목명\s*:\s*(.*?)\s*\*'
+        r'.*?'
+        r'\*\s*입금액\s*:\s*([\d,]+)원.*?'
+        r'\*\s*입금일자\s*:\s*(\d{4})년\s*(\d{2})월\s*(\d{2})일', 
+        re.DOTALL
+    )
+    
+    # 한국 이름 -> 종목코드 변환 사전
+    K_ETF_NAME_TO_CODE = {
+        "TIGER 미국배당다우존스": "458730"
+        # 나중에 다른 종목이 생기면 여기에 "이름": "코드" 추가
+    }
+
+    for match in dom_div_pattern.finditer(full_text):
+        try:
+            name, amount_str, year, month, day = match.groups()
+            name = name.strip()
+            amount = float(amount_str.replace(',', ''))
+            
+            # 카톡에 찍힌 입금일자 오후 3시로 픽스
+            div_dt = datetime(int(year), int(month), int(day), 15, 0, 0)
+            
+            # 사전에서 코드를 찾고, 없으면 일단 이름 자체를 넣음
+            ticker = K_ETF_NAME_TO_CODE.get(name, name)
+            
+            parsed_list.append({
+                "Category": "Domestic_Dividend", 
+                "Date": div_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "Ticker": ticker, 
+                "Type": "Dividend",
+                "Qty": 0, 
+                "Price": 0, 
+                "Amount": amount, 
+                "Memo": "카톡파싱_국내배당"
             })
         except: continue
 
@@ -335,14 +367,10 @@ def parse_kakaotalk_final(text, base_date):
 # -------------------------------------------------------------------
 # [6] Main App
 # -------------------------------------------------------------------
-# -------------------------------------------------------------------
-# [6] Main App
-# -------------------------------------------------------------------
 def main():
     try:
         df_trade, df_money, df_domestic, sheet_instance = load_data()
     except Exception as e:
-        # [수정] 진짜 에러 메시지를 화면에 출력하도록 변경
         st.error(f"🚨 DB 연결/로딩 실패 상세 원인: {e}")
         st.info("💡 팁: 구글 시트의 탭 이름(Money_Log, Trade_Log, Domestic_Log)이 일치하는지 확인하세요.")
         st.stop()
@@ -350,7 +378,7 @@ def main():
     u_trade, u_money, cur_bal, dom_cash, cur_rate, pure_exch_rate, portfolio = process_timeline(df_trade, df_money, df_domestic)
     cur_real_rate = get_realtime_rate()
     
-    # [시세 조회 캐싱 - 국내(yfinance) & 해외(KIS) 하이브리드]
+    # [시세 조회 캐싱]
     tickers = list(portfolio.keys())
     if tickers:
         uncached = [t for t in tickers if t not in st.session_state['price_cache']]
@@ -360,7 +388,6 @@ def main():
                     data = portfolio[tk]
                     if data['is_domestic']:
                         try:
-                            # 국내 종목은 YFinance 활용 (.KS)
                             st.session_state['price_cache'][tk] = yf.Ticker(f"{data['raw_ticker']}.KS").history(period="1d")['Close'].iloc[-1]
                         except: st.session_state['price_cache'][tk] = 0
                     else:
@@ -411,7 +438,7 @@ def main():
     total_pl_krw = total_asset_krw - total_principal_all
     total_pl_pct = (total_pl_krw / total_principal_all * 100) if total_principal_all > 0 else 0
     
-    # BEP (해외자산 기준)
+    # BEP 
     bep_numerator = total_input_principal - sum(d['realized_krw'] for d in portfolio.values() if not d['is_domestic']) - (total_div_usd * cur_real_rate)
     total_usd_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if not d['is_domestic']) + cur_bal
     bep_rate = bep_numerator / total_usd_assets if total_usd_assets > 0 else 0
@@ -477,7 +504,7 @@ def main():
 
     tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "📋 통합 상세", "📜 통합 로그", "🕹️ 입력 매니저"])
     
-    # [Tab 1] Dashboard (Card View)
+    # [Tab 1] Dashboard
     with tab1:
         st.write("### 💳 Portfolio Status")
         for sec in ['배당', '테크', '리츠', '기타']:
@@ -597,7 +624,7 @@ def main():
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
             bg_cls = "bg-red" if total_pl >= 0 else "bg-blue"
             
-            if is_dom: cls_fx = "txt-sub" # 환손익 비활성화 컬러
+            if is_dom: cls_fx = "txt-sub" 
             
             rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{cls_price}'>{price_profit:,.0f}</td><td class='{cls_fx}'>{fx_profit_str}</td><td>{realized_total:,.0f}</td><td class='{cls_tot} {bg_cls}'><b>{total_pl:,.0f}</b></td><td>{margin_str}</td></tr>"
             
@@ -640,19 +667,23 @@ def main():
                         ws_money = sheet_instance.worksheet("Money_Log")
                         ws_dom = sheet_instance.worksheet("Domestic_Log")
                         
-                        max_id = max(pd.to_numeric(u_trade['Order_ID']).max(), pd.to_numeric(u_money['Order_ID']).max())
-                        next_id = int(max_id) + 1
+                        max_id = max(pd.to_numeric(df_trade['Order_ID']).max(), pd.to_numeric(df_money['Order_ID']).max())
+                        next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
                         
                         for item in parsed_items:
                             if item["Category"] == "Trade":
                                 ws_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
                                 next_id += 1
                             elif item["Category"] == "Domestic_Trade":
-                                # 국내 주식 저장 로직
                                 ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), "-", int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"]), item["Memo"] ])
                             elif item["Category"] == "Dividend":
                                 ws_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
                                 next_id += 1
+                            
+                            # [NEW] 국내 ETF 배당 저장 로직 추가
+                            elif item["Category"] == "Domestic_Dividend":
+                                ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), "-", 0, 0, float(item["Amount"]), item["Memo"] ])
+                                
                             elif item["Category"] == "Exchange":
                                 ws_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
                                 next_id += 1
@@ -675,8 +706,8 @@ def main():
                 i_note = st.text_input("비고", value="수기입력")
                 
                 if st.form_submit_button("💾 저장하기"):
-                    max_id = max(pd.to_numeric(u_trade['Order_ID']).max(), pd.to_numeric(u_money['Order_ID']).max())
-                    next_id = int(max_id) + 1
+                    max_id = max(pd.to_numeric(df_trade['Order_ID']).max(), pd.to_numeric(df_money['Order_ID']).max())
+                    next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
                     rate = i_krw / i_usd if i_type=="KRW_to_USD" and i_usd > 0 else 0
                     
                     sheet_instance.worksheet("Money_Log").append_row([
