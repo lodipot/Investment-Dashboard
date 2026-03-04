@@ -92,6 +92,7 @@ def safe_float(val):
     try: return float(str(val).replace(',', '').strip())
     except: return 0.0
 
+@st.cache_data
 def load_data():
     client = get_gsheet_client()
     sh = client.open("Investment_Dashboard_DB")
@@ -127,7 +128,7 @@ def load_data():
         if c in df_domestic.columns: 
             df_domestic[c] = pd.to_numeric(df_domestic[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-    return df_trade, df_money, df_domestic, sh
+    return df_trade, df_money, df_domestic
 
 def get_realtime_rate():
     try:
@@ -369,7 +370,11 @@ def parse_kakaotalk_final(text, base_date):
 # -------------------------------------------------------------------
 def main():
     try:
-        df_trade, df_money, df_domestic, sheet_instance = load_data()
+        df_trade, df_money, df_domestic = load_data()
+        
+        # 시트 저장용 인스턴스는 여기서 따로 불러오기
+        client = get_gsheet_client()
+        sheet_instance = client.open("Investment_Dashboard_DB")
     except Exception as e:
         st.error(f"🚨 DB 연결/로딩 실패 상세 원인: {e}")
         st.info("💡 팁: 구글 시트의 탭 이름(Money_Log, Trade_Log, Domestic_Log)이 일치하는지 확인하세요.")
@@ -451,7 +456,7 @@ def main():
         if st.button("🔄 시세/데이터 새로고침"):
             st.session_state['price_cache'] = {}
             if 'fx_rate' in st.session_state: del st.session_state['fx_rate']
-            st.cache_resource.clear()
+            st.cache_data.clear()
             st.rerun()
 
     # ------------------------------------------------------------------
@@ -691,6 +696,7 @@ def main():
                             
                         st.success(f"✅ {count}건 저장 완료! (캐시 초기화됨)")
                         st.session_state['price_cache'] = {}
+                        st.cache_data.clear()
                         time.sleep(2)
                         st.rerun()
                     else:
@@ -716,6 +722,7 @@ def main():
                     ])
                     st.success("저장 완료!")
                     st.session_state['price_cache'] = {}
+                    st.cache_data.clear()
                     time.sleep(1)
                     st.rerun()
 
