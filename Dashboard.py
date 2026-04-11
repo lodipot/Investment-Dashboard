@@ -9,7 +9,7 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 기본 설정 및 다크모드 강제화
+# [1] 설정 & 다크모드
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
@@ -29,12 +29,9 @@ st.markdown(f"""
     header {{ visibility: hidden; }}
     .block-container {{ padding-top: 1.5rem; }}
     button {{ border-color: {THEME_BORDER} !important; }}
-    
     ::-webkit-scrollbar {{ width: 8px; height: 8px; }}
     ::-webkit-scrollbar-track {{ background: {THEME_BG}; }}
     ::-webkit-scrollbar-thumb {{ background: {THEME_BORDER}; border-radius: 4px; }}
-    ::-webkit-scrollbar-thumb:hover {{ background: #555; }}
-
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
     .stock-card {{ background-color: {THEME_CARD}; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid {THEME_BORDER}; border-left: 6px solid #555; }}
@@ -45,14 +42,12 @@ st.markdown(f"""
     .card-price {{ font-size: 1.1rem; font-weight: 500; color: {THEME_SUB}; }}
     .card-main-val {{ font-size: 1.6rem; font-weight: 800; color: {THEME_TEXT}; text-align: right; margin-bottom: 4px; }}
     .card-sub-box {{ text-align: right; font-size: 1.0rem; font-weight: 600; }}
-    
     .int-table {{ width: 100%; border-collapse: collapse; font-size: 0.95rem; text-align: right; color: {THEME_TEXT}; }}
     .int-table th {{ background-color: #252627; color: {THEME_SUB}; padding: 14px 10px; text-align: right; border-bottom: 1px solid {THEME_BORDER}; font-weight: 600; }}
     .int-table th:first-child {{ text-align: left; }}
     .int-table td {{ padding: 12px 10px; border-bottom: 1px solid #2D2E30; }}
     .int-table td:first-child {{ text-align: left; font-weight: 700; color: #A8C7FA; }}
     .row-total {{ background-color: #2A2B2D; font-weight: 800; border-top: 2px solid {THEME_BORDER}; }}
-    
     .stTabs [data-baseweb="tab-list"] {{ flex-wrap: wrap !important; gap: 8px; justify-content: space-between; border-bottom: none; }}
     .stTabs [data-baseweb="tab"] {{ flex: 1 1 calc(50% - 8px) !important; background-color: {THEME_CARD}; border-radius: 8px; color: {THEME_SUB}; padding: 10px 16px; border: 1px solid {THEME_BORDER}; text-align: center; }}
     .stTabs [aria-selected="true"] {{ background-color: #3C4043 !important; color: #A8C7FA !important; border-color: #A8C7FA !important; font-weight: bold; }}
@@ -60,19 +55,14 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# [2] 데이터 맵핑
+# [2] 맵핑
 # -------------------------------------------------------------------
-SECTOR_ORDER_LIST = {
-    '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO', 'SCHD(ISA)'], 
-    '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'],
-    '리츠': ['PLD', 'AMT'],
-    '기타': [] 
-}
+SECTOR_ORDER_LIST = { '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO', 'SCHD(ISA)'], '테크': ['GOOGL', 'NVDA', 'AMD', 'TSM', 'MSFT', 'AAPL', 'AMZN', 'TSLA', 'AVGO', 'SOXL'], '리츠': ['PLD', 'AMT'], '기타': [] }
 SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM', 'SCHD(ISA)']
 DOMESTIC_TICKER_MAP = { '458730': 'SCHD(ISA)' }
 
 # -------------------------------------------------------------------
-# [3] 로드 (캐싱으로 과부하 방지)
+# [3] 로드
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -101,14 +91,14 @@ def load_data():
             return df
         except: return pd.DataFrame(columns=default_columns)
 
-    df_trade = get_safe_df("Trade_Log", ['Date', 'Order_ID', 'Ticker', 'Type', 'Qty', 'Price_USD', 'Ex_Avg_Rate', 'Note'])
-    df_money = get_safe_df("Money_Log", ['Date', 'Order_ID', 'Type', 'Ticker', 'KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Note'])
-    df_domestic = get_safe_df("Domestic_Log", ['Date', 'Type', 'Ticker', 'Qty', 'Price_KRW', 'Amount_KRW', 'Note'])
+    df_trade = get_safe_df("Trade_Log", ['Date', 'Order_ID', 'Ticker', 'Name', 'Type', 'Qty', 'Price_USD', 'Ex_Avg_Rate', 'Note'])
+    df_money = get_safe_df("Money_Log", ['Date', 'Order_ID', 'Type', 'Ticker', 'KRW_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance', 'Note'])
+    df_domestic = get_safe_df("Domestic_Log", ['Date', 'Type', 'Ticker', 'Name', 'Qty', 'Price_KRW', 'Amount_KRW', 'Note'])
 
     return df_trade, df_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 안정성 최적화 동적 계산 엔진 (단일 패스 처리)
+# [4] 계산 엔진 (배당금 평단가 훼손 방지 완벽 격리)
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money, df_domestic):
     df_money['Source'] = 'Money'; df_trade['Source'] = 'Trade'
@@ -126,7 +116,6 @@ def process_timeline(df_trade, df_money, df_domestic):
     pure_exch_krw_sum = 0.0; pure_exch_usd_sum = 0.0
     portfolio = {} 
     
-    # 1. 외화 타임라인 처리
     for _, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
@@ -141,15 +130,10 @@ def process_timeline(df_trade, df_money, df_domestic):
                 if ticker != 'Cash':
                     if ticker not in portfolio: portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0, 'accum_div_krw':0, 'is_domestic':False, 'raw_ticker':ticker}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
-                
-                # 배당금 유입에 따른 평단가 희석 (잔고가 0 이상일 때만)
-                if current_balance > 0: 
-                    current_avg_rate = (current_balance * current_avg_rate) / (current_balance + usd_amt)
+                # [버그 수정 1] 배당금은 공짜이므로 잔고만 올리고 평단가(current_avg_rate)는 건드리지 않는다!
             else:
-                # [핵심 버그 수정] 잔고 마이너스 시 발생하는 영점 통과 폭발 차단 (Fresh Start)
                 if current_balance <= 0:
-                    if usd_amt > 0:
-                        current_avg_rate = krw_amt / usd_amt
+                    if usd_amt > 0: current_avg_rate = krw_amt / usd_amt
                 else:
                     if (current_balance + usd_amt) > 0:
                         current_avg_rate = ((current_balance * current_avg_rate) + krw_amt) / (current_balance + usd_amt)
@@ -186,7 +170,6 @@ def process_timeline(df_trade, df_money, df_domestic):
                     portfolio[ticker]['invested_krw'] -= (qty * unit_krw)
                     portfolio[ticker]['invested_usd'] -= (qty * unit_usd)
 
-    # 2. 원화 타임라인 처리 (Domestic_Log)
     domestic_cash = 0.0
     dom_principal_sum = 0.0
     for _, row in df_domestic.iterrows():
@@ -200,31 +183,26 @@ def process_timeline(df_trade, df_money, df_domestic):
             portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0, 'accum_div_krw':0, 'is_domestic':True, 'raw_ticker':raw_ticker}
             
         if 'buy' in t_type or '매수' in t_type:
-            portfolio[ticker]['qty'] += qty
-            portfolio[ticker]['invested_krw'] += amount_krw
-            domestic_cash -= amount_krw
+            portfolio[ticker]['qty'] += qty; portfolio[ticker]['invested_krw'] += amount_krw; domestic_cash -= amount_krw
         elif 'sell' in t_type or '매도' in t_type:
             if portfolio[ticker]['qty'] > 0:
                 unit_krw = portfolio[ticker]['invested_krw'] / portfolio[ticker]['qty']
                 portfolio[ticker]['realized_krw'] += amount_krw - (qty * unit_krw)
-                portfolio[ticker]['qty'] -= qty
-                portfolio[ticker]['invested_krw'] -= (qty * unit_krw)
+                portfolio[ticker]['qty'] -= qty; portfolio[ticker]['invested_krw'] -= (qty * unit_krw)
             domestic_cash += amount_krw
         elif 'dividend' in t_type or '배당' in t_type:
             if ticker in portfolio: portfolio[ticker]['accum_div_krw'] += amount_krw
             domestic_cash += amount_krw
         elif 'deposit' in t_type or '입금' in t_type:
-            domestic_cash += amount_krw
-            dom_principal_sum += amount_krw
+            domestic_cash += amount_krw; dom_principal_sum += amount_krw
         elif 'withdraw' in t_type or '출금' in t_type:
-            domestic_cash -= amount_krw
-            dom_principal_sum -= amount_krw
+            domestic_cash -= amount_krw; dom_principal_sum -= amount_krw
 
     pure_exch_rate = pure_exch_krw_sum / pure_exch_usd_sum if pure_exch_usd_sum > 0 else 0
     return current_balance, domestic_cash, current_avg_rate, pure_exch_rate, portfolio, pure_exch_krw_sum, dom_principal_sum
 
 # -------------------------------------------------------------------
-# [5] 텍스트 덩어리 대응 괴물 파서
+# [5] 괴물 파서 (컬럼 밀림 버그 완벽 수정)
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -272,7 +250,7 @@ def parse_kakaotalk_final(text, base_date):
     return parsed_list
 
 # -------------------------------------------------------------------
-# [6] Main UI (점진적 렌더링 도입)
+# [6] Main UI
 # -------------------------------------------------------------------
 def main():
     try:
@@ -319,13 +297,11 @@ def main():
     total_pl_krw = total_asset_krw - total_principal_all
     total_pl_pct = (total_pl_krw / total_principal_all * 100) if total_principal_all > 0 else 0
     
-    # [수정] 전체 마진에 플로어(max 0.0) 완전 제거 - 수학적 원칙 복원
     bep_numerator = total_input_principal - sum(d['realized_krw'] for d in portfolio.values() if not d['is_domestic']) - (total_div_usd * cur_real_rate)
     total_usd_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if not d['is_domestic']) + cur_bal
     bep_rate = (bep_numerator / total_usd_assets) if total_usd_assets > 0 else 0.0
     safety_margin = cur_real_rate - bep_rate
 
-    # --- UI 렌더링 ---
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
     with c2:
@@ -386,7 +362,6 @@ def main():
                     val_krw = qty * cur_p * cur_real_rate; invested_krw = data['invested_krw']; div_krw = data['accum_div_usd'] * cur_real_rate
                     total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
                     
-                    # [수정] 개별 마진에 플로어(max 0.0) 완전 제거 - 수학적 원칙 복원
                     bep_rate_tk = (invested_krw - data['realized_krw'] - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
                     margin_tk = cur_real_rate - bep_rate_tk
                     margin_tk_str = f"{margin_tk:+.1f} 원"
@@ -403,7 +378,7 @@ def main():
                         <table style="width:100%; font-size:0.8rem; color:#ccc;">
                             <tr><td>원금</td><td style="text-align:right;">₩ {invested_krw:,.0f}</td></tr>
                             <tr><td>배당</td><td style="text-align:right;">₩ {div_krw:,.0f}</td></tr>
-                            <tr><td style="color:#AAA">안전마진</td><td style="text-align:right; color:{'#FF9800' if bep_rate_tk <= 0 else '#ccc'};">{margin_tk_str}</td></tr>
+                            <tr><td style="color:#AAA">안전마진</td><td style="text-align:right;">{margin_tk_str}</td></tr>
                         </table>
                     </details>
                 </div>
@@ -430,18 +405,19 @@ def main():
                     next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
                     
                     for item in parsed_items:
+                        # [버그 수정 2] 구글 시트 헤더에 정확히 맞게 빈칸("" 패딩)과 Name 위치(str(item["Ticker"])) 복구
                         if item["Category"] == "Trade":
-                            ws_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
+                            ws_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
                             next_id += 1
                         elif item["Category"] == "Domestic_Trade":
-                            ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"]), item["Memo"] ])
+                            ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), "-", int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"]), item["Memo"] ])
                         elif item["Category"] == "Dividend":
-                            ws_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, item["Memo"] ])
+                            ws_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
                             next_id += 1
                         elif item["Category"] == "Domestic_Dividend":
-                            ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), 0, 0, float(item["Amount"]), item["Memo"] ])
+                            ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), "-", 0, 0, float(item["Amount"]), item["Memo"] ])
                         elif item["Category"] == "Exchange":
-                            ws_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), item["Memo"] ])
+                            ws_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
                             next_id += 1
                         
                     st.success(f"✅ {len(parsed_items)}건 저장 완료!")
@@ -475,13 +451,12 @@ def main():
                     price_profit = (qty * cur_p - data['invested_usd']) * cur_real_rate
                 else: price_profit = 0; fx_profit_str = "-"
                 
-                # [수정] 개별 마진에 플로어(max 0.0) 완전 제거
                 bep_tk = (data['invested_krw'] - (data['realized_krw'] + div_krw)) / (qty * cur_p) if (qty*cur_p) > 0 else 0.0
                 margin_str = f"{cur_real_rate - bep_tk:+.1f}" if qty > 0 else "-"
 
             sum_eval_krw += eval_krw; sum_realized += (data['realized_krw'] + div_krw)
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
-            rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['is_domestic'] else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:{'#FF9800' if bep_tk <= 0 else '#ccc'};'>{margin_str}</td></tr>"
+            rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['is_domestic'] else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:#ccc;'>{margin_str}</td></tr>"
             
         final_pl_calc = (sum_eval_krw + cash_val_krw + dom_cash) - total_principal_all
         total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_val_krw + dom_cash):,.0f}</td><td>-</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{'txt-red' if final_pl_calc>=0 else 'txt-blue'}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
@@ -492,7 +467,7 @@ def main():
         st.dataframe(df_money.fillna(''), use_container_width=True)
         st.dataframe(df_domestic.fillna(''), use_container_width=True)
 
-    # Phase 3: 백그라운드 시세 로딩
+    # Phase 3
     if needs_fetch:
         st.toast("📡 최신 시세 동기화 중...", icon="🔄")
         new_prices = {}
