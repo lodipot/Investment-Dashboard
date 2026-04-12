@@ -9,11 +9,12 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 다크모드
+# [1] 설정 & 다크모드 (모바일 반응형 탭 포함)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
 if 'price_cache' not in st.session_state: st.session_state['price_cache'] = {}
+if 'needs_fetch' not in st.session_state: st.session_state['needs_fetch'] = True # 최초 접속 시 페칭 활성화
 
 THEME_BG = "#131314"
 THEME_CARD = "#18181A"
@@ -62,7 +63,7 @@ SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM', 'SCHD(IS
 DOMESTIC_TICKER_MAP = { '458730': 'SCHD(ISA)' }
 
 # -------------------------------------------------------------------
-# [3] 로드
+# [3] 로드 (캐싱으로 과부하 방지)
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -98,7 +99,7 @@ def load_data():
     return df_trade, df_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 계산 엔진 (배당금 평단가 훼손 방지 완벽 격리)
+# [4] 계산 엔진 (마이너스 BEP 수학적 허용 / 배당 평단가 격리)
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money, df_domestic):
     df_money['Source'] = 'Money'; df_trade['Source'] = 'Trade'
@@ -130,7 +131,7 @@ def process_timeline(df_trade, df_money, df_domestic):
                 if ticker != 'Cash':
                     if ticker not in portfolio: portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0, 'accum_div_krw':0, 'is_domestic':False, 'raw_ticker':ticker}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
-                # [버그 수정 1] 배당금은 공짜이므로 잔고만 올리고 평단가(current_avg_rate)는 건드리지 않는다!
+                # [수정] 배당은 공짜 달러이므로 평단가(current_avg_rate)를 건드리지 않고 잔고만 늘림
             else:
                 if current_balance <= 0:
                     if usd_amt > 0: current_avg_rate = krw_amt / usd_amt
@@ -202,7 +203,7 @@ def process_timeline(df_trade, df_money, df_domestic):
     return current_balance, domestic_cash, current_avg_rate, pure_exch_rate, portfolio, pure_exch_krw_sum, dom_principal_sum
 
 # -------------------------------------------------------------------
-# [5] 괴물 파서 (컬럼 밀림 버그 완벽 수정)
+# [5] 텍스트 덩어리 파서 (컬럼 정확도 매칭)
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -250,7 +251,7 @@ def parse_kakaotalk_final(text, base_date):
     return parsed_list
 
 # -------------------------------------------------------------------
-# [6] Main UI
+# [6] Main UI (Optimistic UI 렌더링)
 # -------------------------------------------------------------------
 def main():
     try:
@@ -260,14 +261,10 @@ def main():
         
     cur_bal, dom_cash, cur_rate, pure_exch_rate, portfolio, total_input_principal, total_dom_principal = process_timeline(df_trade, df_money, df_domestic)
     
-    needs_fetch = False
-    if not st.session_state['price_cache']:
-        needs_fetch = True
-        cur_real_rate = 1450.0 
-        prices = {}
-    else:
-        prices = st.session_state['price_cache']
-        cur_real_rate = st.session_state.get('fx_rate', 1450.0)
+    # [수정] 옵티미스틱 UI 뼈대 로직
+    is_skeleton = len(st.session_state['price_cache']) == 0
+    prices = st.session_state.get('price_cache', {})
+    cur_real_rate = st.session_state.get('fx_rate', 0.0)
     
     total_principal_all = total_input_principal + total_dom_principal
     total_stock_val_krw = 0.0
@@ -302,22 +299,34 @@ def main():
     bep_rate = (bep_numerator / total_usd_assets) if total_usd_assets > 0 else 0.0
     safety_margin = cur_real_rate - bep_rate
 
+    # 스켈레톤(최초 로딩) 상태일 때 시각적 왜곡 방지용 마스킹
+    if is_skeleton:
+        top_asset_str = "로딩중..."
+        top_pl_str = "-"
+        top_margin_str = "로딩중..."
+        top_bep_str = "-"
+    else:
+        top_asset_str = f"₩ {total_asset_krw:,.0f}"
+        is_plus = total_pl_krw >= 0
+        top_pl_str = f"{'▲' if is_plus else '▼'} {abs(total_pl_krw):,.0f} ({total_pl_pct:+.2f}%)"
+        top_margin_str = f"{'+' if safety_margin >= 0 else ''}{safety_margin:,.2f} 원"
+        top_bep_str = f"₩ {bep_rate:,.2f}"
+
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
     with c2:
         if st.button("🔄 시세 새로고침", use_container_width=True):
-            st.session_state['price_cache'] = {}
-            if 'fx_rate' in st.session_state: del st.session_state['fx_rate']
+            # [수정] 캐시를 지우지 않고 페치 신호만 보냄 (기존 유효 정보 유지)
+            st.session_state['needs_fetch'] = True
             st.rerun()
 
     kpi_cols = st.columns(3)
     with kpi_cols[0]:
-        is_plus = total_pl_krw >= 0
         st.markdown(f"""
-        <div class="stock-card {'card-up' if is_plus else 'card-down'}">
+        <div class="stock-card {'card-up' if (not is_skeleton and total_pl_krw >= 0) else 'card-down'}">
             <div class="card-header"><span class="card-ticker">총 자산</span><span class="card-price">Total Assets</span></div>
-            <div class="card-main-val">₩ {total_asset_krw:,.0f}</div>
-            <div class="card-sub-box {'txt-red' if is_plus else 'txt-blue'}">{'▲' if is_plus else '▼'} {abs(total_pl_krw):,.0f} ({total_pl_pct:+.2f}%)</div>
+            <div class="card-main-val">{top_asset_str}</div>
+            <div class="card-sub-box {'txt-red' if (not is_skeleton and total_pl_krw >= 0) else 'txt-blue' if not is_skeleton else 'txt-sub'}">{top_pl_str}</div>
         </div>
         """, unsafe_allow_html=True)
     with kpi_cols[1]:
@@ -329,12 +338,11 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     with kpi_cols[2]:
-        margin_cls = "txt-red" if safety_margin >= 0 else "txt-blue"
         st.markdown(f"""
-        <div class="stock-card {'card-up' if safety_margin >= 0 else 'card-down'}">
+        <div class="stock-card {'card-up' if (not is_skeleton and safety_margin >= 0) else 'card-down'}">
             <div class="card-header"><span class="card-ticker">안전마진</span><span class="card-price">Safety Margin</span></div>
-            <div class="card-main-val {margin_cls}">{'+' if safety_margin >= 0 else ''}{safety_margin:,.2f} 원</div>
-            <div class="card-sub-box"><span style="color:#888;">BEP ₩ {bep_rate:,.2f}</span></div>
+            <div class="card-main-val {'txt-red' if (not is_skeleton and safety_margin >= 0) else 'txt-blue' if not is_skeleton else 'txt-sub'}">{top_margin_str}</div>
+            <div class="card-sub-box"><span style="color:#888;">BEP {top_bep_str}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -354,28 +362,38 @@ def main():
             for idx, tk in enumerate(valid_tickers):
                 data = portfolio[tk]; qty = data['qty']; cur_p = prices.get(tk, 0)
                 
-                if data['is_domestic']:
-                    val_krw = qty * cur_p; invested_krw = data['invested_krw']; div_krw = data['accum_div_krw']
-                    total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
-                    margin_tk_str = "-"; price_display = f"₩ {cur_p:,.0f}"
+                invested_krw = data['invested_krw']
+                div_krw = data['accum_div_krw'] if data['is_domestic'] else data['accum_div_usd'] * cur_real_rate
+                
+                if is_skeleton:
+                    price_display = "-"; val_krw_str = "-"; pl_str = "-"; margin_tk_str = "-"; is_p = True
                 else:
-                    val_krw = qty * cur_p * cur_real_rate; invested_krw = data['invested_krw']; div_krw = data['accum_div_usd'] * cur_real_rate
-                    total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
-                    
-                    bep_rate_tk = (invested_krw - data['realized_krw'] - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
-                    margin_tk = cur_real_rate - bep_rate_tk
-                    margin_tk_str = f"{margin_tk:+.1f} 원"
-                    price_display = f"${cur_p:.2f}"
+                    if data['is_domestic']:
+                        val_krw = qty * cur_p
+                        total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
+                        margin_tk_str = "-"
+                        price_display = f"₩ {cur_p:,.0f}"
+                    else:
+                        val_krw = qty * cur_p * cur_real_rate
+                        total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
+                        bep_rate_tk = (invested_krw - data['realized_krw'] - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
+                        margin_tk = cur_real_rate - bep_rate_tk
+                        margin_tk_str = f"{margin_tk:+.1f} 원"
+                        price_display = f"${cur_p:.2f}"
 
-                total_ret = (total_pl_tk / invested_krw * 100) if invested_krw > 0 else 0
-                is_p = total_pl_tk >= 0
+                    total_ret = (total_pl_tk / invested_krw * 100) if invested_krw > 0 else 0
+                    is_p = total_pl_tk >= 0
+                    val_krw_str = f"₩ {val_krw:,.0f}"
+                    pl_str = f"{'▲' if is_p else '▼'} {abs(total_pl_tk):,.0f} ({'+' if is_p else ''}{total_ret:.1f}%)"
+
                 html = f"""
                 <div class="stock-card {'card-up' if is_p else 'card-down'}">
                     <div class="card-header"><span class="card-ticker">{tk}</span><span class="card-price">{price_display}</span></div>
-                    <div class="card-main-val">₩ {val_krw:,.0f}</div>
-                    <div class="card-sub-box {'txt-red' if is_p else 'txt-blue'}">{'▲' if is_p else '▼'} {abs(total_pl_tk):,.0f} ({'+' if is_p else ''}{total_ret:.1f}%)</div>
-                    <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세</summary>
+                    <div class="card-main-val">{val_krw_str}</div>
+                    <div class="card-sub-box {'txt-red' if is_p else 'txt-blue' if not is_skeleton else 'txt-sub'}">{pl_str}</div>
+                    <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세 (DB)</summary>
                         <table style="width:100%; font-size:0.8rem; color:#ccc;">
+                            <tr><td>보유량</td><td style="text-align:right;">{qty:,.0f} 주</td></tr>
                             <tr><td>원금</td><td style="text-align:right;">₩ {invested_krw:,.0f}</td></tr>
                             <tr><td>배당</td><td style="text-align:right;">₩ {div_krw:,.0f}</td></tr>
                             <tr><td style="color:#AAA">안전마진</td><td style="text-align:right;">{margin_tk_str}</td></tr>
@@ -386,7 +404,7 @@ def main():
                 cols[idx % 4].markdown(html, unsafe_allow_html=True)
 
     with tab_input:
-        st.info("💡 팁: 여러 개의 메시지를 엔터 없이 복사->붙여넣기 해도 인공지능 파서가 알아서 분리합니다.")
+        st.info("💡 팁: 여러 개의 카톡 메시지를 한 번에 쏟아부어도 인공지능이 엔터 없이 전부 분리해 저장합니다.")
         c1, c2 = st.columns([1, 2])
         with c1: ref_date = st.date_input("기준 날짜 (카톡 수신일)", datetime.now())
         with c2: raw_text = st.text_area("카톡 내용 붙여넣기", height=150, placeholder="[한국투자증권 체결안내]08:05...")
@@ -405,7 +423,7 @@ def main():
                     next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
                     
                     for item in parsed_items:
-                        # [버그 수정 2] 구글 시트 헤더에 정확히 맞게 빈칸("" 패딩)과 Name 위치(str(item["Ticker"])) 복구
+                        # [버그 수정 2] 컬럼 순서 및 빈칸 패딩 완벽 일치 복원
                         if item["Category"] == "Trade":
                             ws_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
                             next_id += 1
@@ -420,10 +438,10 @@ def main():
                             ws_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
                             next_id += 1
                         
-                    st.success(f"✅ {len(parsed_items)}건 저장 완료!")
+                    st.success(f"✅ {len(parsed_items)}건 DB 저장 완료! 시세를 재동기화합니다.")
                     st.cache_data.clear() 
-                    st.session_state['price_cache'] = {}
-                    time.sleep(1); st.rerun()
+                    st.session_state['needs_fetch'] = True # 저장 후 시세 업데이트 트리거
+                    time.sleep(1.5); st.rerun()
                 else:
                     st.warning("⚠️ 저장할 내역을 찾지 못했습니다.")
 
@@ -436,6 +454,10 @@ def main():
             if tk == 'Cash': continue
             data = portfolio[tk]; qty = data['qty']; cur_p = prices.get(tk, 0)
             if qty == 0 and data['realized_krw'] == 0 and data['accum_div_usd'] == 0 and data['accum_div_krw'] == 0: continue
+
+            if is_skeleton:
+                rows_html += f"<tr><td>{tk}</td><td>-</td><td>-</td><td>-</td><td>{data['realized_krw'] + (data['accum_div_krw'] if data['is_domestic'] else 0):,.0f}</td><td>-</td><td style='color:#ccc;'>-</td></tr>"
+                continue
 
             if data['is_domestic']:
                 eval_krw = qty * cur_p; div_krw = data['accum_div_krw']
@@ -458,8 +480,11 @@ def main():
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
             rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['is_domestic'] else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:#ccc;'>{margin_str}</td></tr>"
             
-        final_pl_calc = (sum_eval_krw + cash_val_krw + dom_cash) - total_principal_all
-        total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_val_krw + dom_cash):,.0f}</td><td>-</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{'txt-red' if final_pl_calc>=0 else 'txt-blue'}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
+        if is_skeleton:
+            total_row = f"<tr class='row-total'><td>TOTAL</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
+        else:
+            final_pl_calc = (sum_eval_krw + cash_val_krw + dom_cash) - total_principal_all
+            total_row = f"<tr class='row-total'><td>TOTAL</td><td>{(sum_eval_krw + cash_val_krw + dom_cash):,.0f}</td><td>-</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{'txt-red' if final_pl_calc>=0 else 'txt-blue'}'>{final_pl_calc:,.0f}</td><td>{safety_margin:+.1f}</td></tr>"
         st.markdown(header + rows_html + total_row + "</tbody></table>", unsafe_allow_html=True)
 
     with tab_log:
@@ -467,9 +492,9 @@ def main():
         st.dataframe(df_money.fillna(''), use_container_width=True)
         st.dataframe(df_domestic.fillna(''), use_container_width=True)
 
-    # Phase 3
-    if needs_fetch:
-        st.toast("📡 최신 시세 동기화 중...", icon="🔄")
+    # Phase 3: 백그라운드 페칭 (UI가 다 그려진 후 조용히 실행)
+    if st.session_state.get('needs_fetch', False):
+        st.toast("📡 최신 시세를 동기화합니다...", icon="🔄")
         new_prices = {}
         for tk, data in portfolio.items():
             if data['is_domestic']:
@@ -483,7 +508,8 @@ def main():
         except: st.session_state['fx_rate'] = 1450.0
         
         st.session_state['price_cache'] = new_prices
-        st.rerun() 
+        st.session_state['needs_fetch'] = False # 무한루프 방지
+        st.rerun() # 데이터를 다 가져왔으니 화면을 Seamless하게 업데이트!
 
 if __name__ == "__main__":
     main()
