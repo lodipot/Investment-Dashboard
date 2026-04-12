@@ -9,12 +9,12 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 다크모드 (모바일 반응형 탭 포함)
+# [1] 설정 & 다크모드 (Neutral 테마 추가)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
 if 'price_cache' not in st.session_state: st.session_state['price_cache'] = {}
-if 'needs_fetch' not in st.session_state: st.session_state['needs_fetch'] = True # 최초 접속 시 페칭 활성화
+if 'needs_fetch' not in st.session_state: st.session_state['needs_fetch'] = True
 
 THEME_BG = "#131314"
 THEME_CARD = "#18181A"
@@ -35,9 +35,13 @@ st.markdown(f"""
     ::-webkit-scrollbar-thumb {{ background: {THEME_BORDER}; border-radius: 4px; }}
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
+    .txt-sub {{ color: {THEME_SUB} !important; }}
+    
     .stock-card {{ background-color: {THEME_CARD}; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid {THEME_BORDER}; border-left: 6px solid #555; }}
     .card-up {{ border-left-color: {COLOR_RED} !important; }}
     .card-down {{ border-left-color: {COLOR_BLUE} !important; }}
+    .card-neutral {{ border-left-color: #555 !important; }} /* 무채색 뼈대용 테두리 */
+    
     .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }}
     .card-ticker {{ font-size: 1.4rem; font-weight: 900; color: {THEME_TEXT}; }}
     .card-price {{ font-size: 1.1rem; font-weight: 500; color: {THEME_SUB}; }}
@@ -63,7 +67,7 @@ SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM', 'SCHD(IS
 DOMESTIC_TICKER_MAP = { '458730': 'SCHD(ISA)' }
 
 # -------------------------------------------------------------------
-# [3] 로드 (캐싱으로 과부하 방지)
+# [3] 로드
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -99,7 +103,7 @@ def load_data():
     return df_trade, df_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 계산 엔진 (마이너스 BEP 수학적 허용 / 배당 평단가 격리)
+# [4] 계산 엔진
 # -------------------------------------------------------------------
 def process_timeline(df_trade, df_money, df_domestic):
     df_money['Source'] = 'Money'; df_trade['Source'] = 'Trade'
@@ -131,7 +135,6 @@ def process_timeline(df_trade, df_money, df_domestic):
                 if ticker != 'Cash':
                     if ticker not in portfolio: portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_usd':0, 'realized_krw':0, 'accum_div_usd':0, 'accum_div_krw':0, 'is_domestic':False, 'raw_ticker':ticker}
                     portfolio[ticker]['accum_div_usd'] += usd_amt
-                # [수정] 배당은 공짜 달러이므로 평단가(current_avg_rate)를 건드리지 않고 잔고만 늘림
             else:
                 if current_balance <= 0:
                     if usd_amt > 0: current_avg_rate = krw_amt / usd_amt
@@ -203,7 +206,7 @@ def process_timeline(df_trade, df_money, df_domestic):
     return current_balance, domestic_cash, current_avg_rate, pure_exch_rate, portfolio, pure_exch_krw_sum, dom_principal_sum
 
 # -------------------------------------------------------------------
-# [5] 텍스트 덩어리 파서 (컬럼 정확도 매칭)
+# [5] 파서
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -251,7 +254,7 @@ def parse_kakaotalk_final(text, base_date):
     return parsed_list
 
 # -------------------------------------------------------------------
-# [6] Main UI (Optimistic UI 렌더링)
+# [6] Main UI (견고한 Optimistic UI)
 # -------------------------------------------------------------------
 def main():
     try:
@@ -261,10 +264,12 @@ def main():
         
     cur_bal, dom_cash, cur_rate, pure_exch_rate, portfolio, total_input_principal, total_dom_principal = process_timeline(df_trade, df_money, df_domestic)
     
-    # [수정] 옵티미스틱 UI 뼈대 로직
-    is_skeleton = len(st.session_state['price_cache']) == 0
     prices = st.session_state.get('price_cache', {})
     cur_real_rate = st.session_state.get('fx_rate', 0.0)
+    
+    # [핵심] 캐시에 저장된 주가 합계가 0이면(API 통신 전이거나 실패) 뼈대 모드 발동!
+    has_valid_prices = sum(prices.values()) > 0 if prices else False
+    is_skeleton = not has_valid_prices
     
     total_principal_all = total_input_principal + total_dom_principal
     total_stock_val_krw = 0.0
@@ -299,34 +304,39 @@ def main():
     bep_rate = (bep_numerator / total_usd_assets) if total_usd_assets > 0 else 0.0
     safety_margin = cur_real_rate - bep_rate
 
-    # 스켈레톤(최초 로딩) 상태일 때 시각적 왜곡 방지용 마스킹
+    # 스켈레톤(최초 로딩 또는 API 완전 실패) 시 완벽한 무채색 방어 로직
     if is_skeleton:
-        top_asset_str = "로딩중..."
+        top_asset_str = "로딩중..." if st.session_state.get('needs_fetch') else "시세 API 점검중"
         top_pl_str = "-"
-        top_margin_str = "로딩중..."
+        top_margin_str = "-"
         top_bep_str = "-"
+        card_cls_main = "stock-card card-neutral"
+        card_cls_margin = "stock-card card-neutral"
+        txt_cls = "txt-sub"
     else:
         top_asset_str = f"₩ {total_asset_krw:,.0f}"
         is_plus = total_pl_krw >= 0
         top_pl_str = f"{'▲' if is_plus else '▼'} {abs(total_pl_krw):,.0f} ({total_pl_pct:+.2f}%)"
         top_margin_str = f"{'+' if safety_margin >= 0 else ''}{safety_margin:,.2f} 원"
         top_bep_str = f"₩ {bep_rate:,.2f}"
+        card_cls_main = f"stock-card {'card-up' if is_plus else 'card-down'}"
+        card_cls_margin = f"stock-card {'card-up' if safety_margin >= 0 else 'card-down'}"
+        txt_cls = "txt-red" if is_plus else "txt-blue"
 
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
     with c2:
         if st.button("🔄 시세 새로고침", use_container_width=True):
-            # [수정] 캐시를 지우지 않고 페치 신호만 보냄 (기존 유효 정보 유지)
             st.session_state['needs_fetch'] = True
             st.rerun()
 
     kpi_cols = st.columns(3)
     with kpi_cols[0]:
         st.markdown(f"""
-        <div class="stock-card {'card-up' if (not is_skeleton and total_pl_krw >= 0) else 'card-down'}">
+        <div class="{card_cls_main}">
             <div class="card-header"><span class="card-ticker">총 자산</span><span class="card-price">Total Assets</span></div>
             <div class="card-main-val">{top_asset_str}</div>
-            <div class="card-sub-box {'txt-red' if (not is_skeleton and total_pl_krw >= 0) else 'txt-blue' if not is_skeleton else 'txt-sub'}">{top_pl_str}</div>
+            <div class="card-sub-box {txt_cls}">{top_pl_str}</div>
         </div>
         """, unsafe_allow_html=True)
     with kpi_cols[1]:
@@ -339,9 +349,9 @@ def main():
         """, unsafe_allow_html=True)
     with kpi_cols[2]:
         st.markdown(f"""
-        <div class="stock-card {'card-up' if (not is_skeleton and safety_margin >= 0) else 'card-down'}">
+        <div class="{card_cls_margin}">
             <div class="card-header"><span class="card-ticker">안전마진</span><span class="card-price">Safety Margin</span></div>
-            <div class="card-main-val {'txt-red' if (not is_skeleton and safety_margin >= 0) else 'txt-blue' if not is_skeleton else 'txt-sub'}">{top_margin_str}</div>
+            <div class="card-main-val {txt_cls}">{top_margin_str}</div>
             <div class="card-sub-box"><span style="color:#888;">BEP {top_bep_str}</span></div>
         </div>
         """, unsafe_allow_html=True)
@@ -366,7 +376,10 @@ def main():
                 div_krw = data['accum_div_krw'] if data['is_domestic'] else data['accum_div_usd'] * cur_real_rate
                 
                 if is_skeleton:
-                    price_display = "-"; val_krw_str = "-"; pl_str = "-"; margin_tk_str = "-"; is_p = True
+                    price_display = "로딩중..." if st.session_state.get('needs_fetch') else "API 확인요망"
+                    val_krw_str = "-"; pl_str = "-"; margin_tk_str = "-"
+                    card_cls_tk = "stock-card card-neutral"
+                    txt_cls_tk = "txt-sub"
                 else:
                     if data['is_domestic']:
                         val_krw = qty * cur_p
@@ -385,12 +398,14 @@ def main():
                     is_p = total_pl_tk >= 0
                     val_krw_str = f"₩ {val_krw:,.0f}"
                     pl_str = f"{'▲' if is_p else '▼'} {abs(total_pl_tk):,.0f} ({'+' if is_p else ''}{total_ret:.1f}%)"
+                    card_cls_tk = f"stock-card {'card-up' if is_p else 'card-down'}"
+                    txt_cls_tk = "txt-red" if is_p else "txt-blue"
 
                 html = f"""
-                <div class="stock-card {'card-up' if is_p else 'card-down'}">
+                <div class="{card_cls_tk}">
                     <div class="card-header"><span class="card-ticker">{tk}</span><span class="card-price">{price_display}</span></div>
                     <div class="card-main-val">{val_krw_str}</div>
-                    <div class="card-sub-box {'txt-red' if is_p else 'txt-blue' if not is_skeleton else 'txt-sub'}">{pl_str}</div>
+                    <div class="card-sub-box {txt_cls_tk}">{pl_str}</div>
                     <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세 (DB)</summary>
                         <table style="width:100%; font-size:0.8rem; color:#ccc;">
                             <tr><td>보유량</td><td style="text-align:right;">{qty:,.0f} 주</td></tr>
@@ -423,7 +438,6 @@ def main():
                     next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
                     
                     for item in parsed_items:
-                        # [버그 수정 2] 컬럼 순서 및 빈칸 패딩 완벽 일치 복원
                         if item["Category"] == "Trade":
                             ws_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
                             next_id += 1
@@ -440,7 +454,7 @@ def main():
                         
                     st.success(f"✅ {len(parsed_items)}건 DB 저장 완료! 시세를 재동기화합니다.")
                     st.cache_data.clear() 
-                    st.session_state['needs_fetch'] = True # 저장 후 시세 업데이트 트리거
+                    st.session_state['needs_fetch'] = True 
                     time.sleep(1.5); st.rerun()
                 else:
                     st.warning("⚠️ 저장할 내역을 찾지 못했습니다.")
@@ -492,24 +506,35 @@ def main():
         st.dataframe(df_money.fillna(''), use_container_width=True)
         st.dataframe(df_domestic.fillna(''), use_container_width=True)
 
-    # Phase 3: 백그라운드 페칭 (UI가 다 그려진 후 조용히 실행)
+    # Phase 3: 백그라운드 페칭 (기존 가격 유지 방어벽 탑재)
     if st.session_state.get('needs_fetch', False):
         st.toast("📡 최신 시세를 동기화합니다...", icon="🔄")
         new_prices = {}
+        old_prices = st.session_state.get('price_cache', {})
+        
         for tk, data in portfolio.items():
+            p = 0
             if data['is_domestic']:
-                try: new_prices[tk] = yf.Ticker(f"{data['raw_ticker']}.KS").history(period="1d")['Close'].iloc[-1]
-                except: new_prices[tk] = 0
-            else: new_prices[tk] = kis.get_current_price(tk)
+                try: p = yf.Ticker(f"{data['raw_ticker']}.KS").history(period="1d")['Close'].iloc[-1]
+                except: p = 0
+            else: 
+                p = kis.get_current_price(tk)
+            
+            # [버그 수정 1] 주말/API 통신 오류 등으로 0원 반환 시 기존 유효 가격을 덮어쓰지 않고 유지!
+            if p <= 0 and tk in old_prices and old_prices[tk] > 0:
+                p = old_prices[tk]
+                
+            new_prices[tk] = p
         
         try:
             fx_data = yf.Ticker("KRW=X").history(period="1d")
-            st.session_state['fx_rate'] = fx_data['Close'].iloc[-1] if not fx_data.empty else 1450.0
-        except: st.session_state['fx_rate'] = 1450.0
+            new_fx = fx_data['Close'].iloc[-1] if not fx_data.empty else 1450.0
+        except: new_fx = 1450.0
         
+        st.session_state['fx_rate'] = new_fx
         st.session_state['price_cache'] = new_prices
-        st.session_state['needs_fetch'] = False # 무한루프 방지
-        st.rerun() # 데이터를 다 가져왔으니 화면을 Seamless하게 업데이트!
+        st.session_state['needs_fetch'] = False 
+        st.rerun() 
 
 if __name__ == "__main__":
     main()
