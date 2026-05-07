@@ -344,15 +344,16 @@ def main():
     total_pl_krw = total_asset_krw - total_principal_all
     total_pl_pct = (total_pl_krw / total_principal_all * 100) if total_principal_all > 0 else 0
     
+    # [수정됨] dict.values() -> dict.items() 로 언패킹 에러 완벽 해결
     # USD 큐브 마진 계산
     usd_bep_num = usd_krw_sum - sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'USD') - (usd_div_total_for * cur_usd_rate)
-    usd_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.values() if d['currency'] == 'USD') + usd_bal
+    usd_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if d['currency'] == 'USD') + usd_bal
     usd_bep = (usd_bep_num / usd_assets) if usd_assets > 0 else 0.0
     usd_margin = cur_usd_rate - usd_bep
 
     # JPY 큐브 마진 계산
     jpy_bep_num = jpy_krw_sum - sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'JPY') - (jpy_div_total_for * cur_jpy_rate)
-    jpy_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.values() if d['currency'] == 'JPY') + jpy_bal
+    jpy_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if d['currency'] == 'JPY') + jpy_bal
     jpy_bep = (jpy_bep_num / jpy_assets) if jpy_assets > 0 else 0.0
     jpy_margin = cur_jpy_rate - jpy_bep
 
