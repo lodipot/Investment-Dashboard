@@ -60,7 +60,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# [2] 맵핑 (올림푸스 '의료' 섹터 추가)
+# [2] 맵핑
 # -------------------------------------------------------------------
 SECTOR_ORDER_LIST = { 
     '배당': ['O', 'JEPI', 'JEPQ', 'SCHD', 'MAIN', 'KO', 'SCHD(ISA)'], 
@@ -73,7 +73,7 @@ SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM', '7733.T'
 DOMESTIC_TICKER_MAP = { '458730': 'SCHD(ISA)' }
 
 # -------------------------------------------------------------------
-# [3] 로드 (분리된 시트 반영)
+# [3] 로드
 # -------------------------------------------------------------------
 @st.cache_resource
 def get_gsheet_client():
@@ -111,7 +111,7 @@ def load_data():
     return df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 계산 엔진 (외화 범용화 모듈)
+# [4] 계산 엔진
 # -------------------------------------------------------------------
 def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
     df_t = df_t_raw.copy()
@@ -227,7 +227,7 @@ def process_timeline(df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_
     return usd_bal, usd_rate, usd_krw_sum, jpy_bal, jpy_rate, jpy_krw_sum, dom_cash, dom_principal_sum, portfolio
 
 # -------------------------------------------------------------------
-# [5] 카톡 파서 (임시 JPY 감지 로직 추가)
+# [5] 카톡 파서
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -246,7 +246,7 @@ def parse_kakaotalk_final(text, base_date):
                 parsed_list.append({ "Category": "Domestic_Trade", "Date": t_dt.strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
                 continue
                 
-            # 일본 거래 (임시)
+            # 일본 거래
             jpy_tr_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:(매수|매도).*?\*종목명:([A-Za-z0-9 .]+)(?:/|$).*?\*체결수량:([\d,]+).*?\*체결단가:JPY\s*([\d.]+)', chunk)
             if jpy_tr_m:
                 t_str, t_dir, t_tkr, t_qty, t_prc = jpy_tr_m.groups()
@@ -262,7 +262,7 @@ def parse_kakaotalk_final(text, base_date):
                 parsed_list.append({ "Category": "USD_Trade", "Date": final_dt, "Ticker": t_tkr.strip(), "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
                 continue
 
-            # 일본 배당 (임시)
+            # 일본 배당
             jpy_div_m = re.search(r'최원준님\s*(\d{2}/\d{2}).*?([A-Z0-9.]+)/.*?JPY\s*([\d.]+)\s*세전배당입금', chunk)
             if jpy_div_m:
                 d_str, t_tkr, t_amt = jpy_div_m.groups()
@@ -286,7 +286,7 @@ def parse_kakaotalk_final(text, base_date):
                 parsed_list.append({ "Category": "Domestic_Dividend", "Date": datetime(int(y), int(m), int(d), 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Type": "Dividend", "Qty": 0, "Price": 0, "Amount": float(t_amt.replace(',', '')), "Memo": "카톡파싱_국내배당" })
                 continue
 
-            # 일본 환전 (임시)
+            # 일본 환전
             jpy_ex_m = re.search(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?JPY\s*([0-9,.]+)', chunk)
             if jpy_ex_m:
                 k_amt, ex_rt, u_amt = jpy_ex_m.groups()
@@ -303,7 +303,7 @@ def parse_kakaotalk_final(text, base_date):
     return parsed_list
 
 # -------------------------------------------------------------------
-# [6] Main UI (3대 통합 KPI 큐브 + Optimistic UI)
+# [6] Main UI
 # -------------------------------------------------------------------
 def main():
     try:
@@ -344,20 +344,16 @@ def main():
     total_pl_krw = total_asset_krw - total_principal_all
     total_pl_pct = (total_pl_krw / total_principal_all * 100) if total_principal_all > 0 else 0
     
-    # [수정됨] dict.values() -> dict.items() 로 언패킹 에러 완벽 해결
-    # USD 큐브 마진 계산
     usd_bep_num = usd_krw_sum - sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'USD') - (usd_div_total_for * cur_usd_rate)
     usd_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if d['currency'] == 'USD') + usd_bal
     usd_bep = (usd_bep_num / usd_assets) if usd_assets > 0 else 0.0
     usd_margin = cur_usd_rate - usd_bep
 
-    # JPY 큐브 마진 계산
     jpy_bep_num = jpy_krw_sum - sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'JPY') - (jpy_div_total_for * cur_jpy_rate)
     jpy_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if d['currency'] == 'JPY') + jpy_bal
     jpy_bep = (jpy_bep_num / jpy_assets) if jpy_assets > 0 else 0.0
     jpy_margin = cur_jpy_rate - jpy_bep
 
-    # 스켈레톤 마스킹
     if is_skeleton:
         top_asset_str = "로딩중..." if st.session_state.get('needs_fetch') else "시세 API 점검중"
         top_pl_str = "-"
@@ -397,7 +393,6 @@ def main():
             st.session_state['needs_fetch'] = True
             st.rerun()
 
-    # --- 3대 KPI 큐브 통합 ---
     kpi_cols = st.columns(3)
     with kpi_cols[0]:
         st.markdown(f"""
@@ -495,57 +490,94 @@ def main():
                 """
                 cols[idx % 4].markdown(html, unsafe_allow_html=True)
 
+    # -------------------------------------------------------------------
+    # [새로운 입력 매니저: Human-in-the-Loop 적용]
+    # -------------------------------------------------------------------
     with tab_input:
-        st.info("💡 팁: 여러 개의 카톡 메시지를 한 번에 쏟아부어도 인공지능이 엔터 없이 전부 분리해 저장합니다.")
+        st.info("💡 팁: 여러 개의 카톡 메시지를 쏟아부어도 인공지능이 분석합니다. 저장 전 **검수 및 수정**이 가능합니다.")
         c1, c2 = st.columns([1, 2])
         with c1: ref_date = st.date_input("기준 날짜 (카톡 수신일)", datetime.now())
         with c2: raw_text = st.text_area("카톡 내용 붙여넣기", height=150, placeholder="[한국투자증권 체결안내]08:05...")
         
-        if st.button("🚀 대기열 전체 분석 및 DB 저장", type="primary", use_container_width=True):
+        # 1. 1차 파싱 및 세금 추정 로직
+        if st.button("🚀 데이터 분석 (검수용)", type="primary", use_container_width=True):
             if raw_text:
                 parsed_items = parse_kakaotalk_final(raw_text, ref_date)
                 if parsed_items:
-                    client = get_gsheet_client()
-                    sheet_instance = client.open("Investment_Dashboard_DB")
-                    ws_usd_trade = sheet_instance.worksheet("USD_Trade_Log")
-                    ws_usd_money = sheet_instance.worksheet("USD_Money_Log")
-                    ws_jpy_trade = sheet_instance.worksheet("JPY_Trade_Log")
-                    ws_jpy_money = sheet_instance.worksheet("JPY_Money_Log")
-                    ws_dom = sheet_instance.worksheet("Domestic_Log")
-                    
-                    max_id = max(pd.to_numeric(df_usd_trade['Order_ID']).max(), pd.to_numeric(df_usd_money['Order_ID']).max(), pd.to_numeric(df_jpy_trade['Order_ID']).max(), pd.to_numeric(df_jpy_money['Order_ID']).max())
-                    next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
-                    
                     for item in parsed_items:
-                        if item["Category"] == "USD_Trade":
-                            ws_usd_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
-                            next_id += 1
-                        elif item["Category"] == "USD_Dividend":
-                            ws_usd_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
-                            next_id += 1
-                        elif item["Category"] == "USD_Exchange":
-                            ws_usd_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
-                            next_id += 1
-                        elif item["Category"] == "Japan_Trade":
-                            ws_jpy_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
-                            next_id += 1
+                        # 해외 배당 원천징수 사전 반영 (미국 15%, 일본 15.315%)
+                        if item["Category"] == "USD_Dividend":
+                            item["Price"] = round(item["Price"] * 0.85, 2)
+                            item["Memo"] += " (미국세금 15% 반영)"
                         elif item["Category"] == "Japan_Dividend":
-                            ws_jpy_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
-                            next_id += 1
-                        elif item["Category"] == "Japan_Exchange":
-                            ws_jpy_money.append_row([ item["Date"], int(next_id), "KRW_to_JPY", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
-                            next_id += 1
-                        elif item["Category"] == "Domestic_Trade":
-                            ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), "-", int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"]), item["Memo"] ])
-                        elif item["Category"] == "Domestic_Dividend":
-                            ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), "-", 0, 0, float(item["Amount"]), item["Memo"] ])
-                        
-                    st.success(f"✅ {len(parsed_items)}건 DB 저장 완료! 시세를 재동기화합니다.")
-                    st.cache_data.clear() 
-                    st.session_state['needs_fetch'] = True 
-                    time.sleep(1.5); st.rerun()
+                            item["Price"] = round(item["Price"] * (1 - 0.15315), 2)
+                            item["Memo"] += " (일본세금 15.3% 반영)"
+                    
+                    st.session_state['parsed_data'] = parsed_items
                 else:
-                    st.warning("⚠️ 저장할 내역을 찾지 못했습니다.")
+                    st.warning("⚠️ 분석할 내역을 찾지 못했습니다.")
+
+        # 2. 검수 구역 (Staging Area)
+        if 'parsed_data' in st.session_state and st.session_state['parsed_data']:
+            st.subheader("✅ 파싱 결과 검수 및 수정")
+            st.caption("표의 셀을 클릭해 직접 수정할 수 있습니다. 중복된 데이터는 **가장 왼쪽 인덱스를 클릭하고 Delete 키를 누르거나 우측 상단 휴지통 아이콘**으로 삭제하세요.")
+            
+            df_parsed = pd.DataFrame(st.session_state['parsed_data'])
+            cols_order = ["Category", "Date", "Ticker", "Type", "Qty", "Price", "Amount", "Memo"]
+            df_parsed = df_parsed[cols_order]
+            
+            # st.data_editor를 통한 엑셀 형태의 자유로운 수정 및 삭제 지원
+            edited_df = st.data_editor(
+                df_parsed,
+                num_rows="dynamic", # ❗ 여기서 행 추가/삭제(Delete 키)를 지원합니다
+                use_container_width=True,
+                key="data_editor"
+            )
+            
+            # 3. 일괄 DB 반영 (Batch Save)
+            if st.button("💾 검수 완료 및 DB 최종 반영", type="primary", use_container_width=True):
+                client = get_gsheet_client()
+                sheet_instance = client.open("Investment_Dashboard_DB")
+                ws_usd_trade = sheet_instance.worksheet("USD_Trade_Log")
+                ws_usd_money = sheet_instance.worksheet("USD_Money_Log")
+                ws_jpy_trade = sheet_instance.worksheet("JPY_Trade_Log")
+                ws_jpy_money = sheet_instance.worksheet("JPY_Money_Log")
+                ws_dom = sheet_instance.worksheet("Domestic_Log")
+                
+                max_id = max(pd.to_numeric(df_usd_trade['Order_ID']).max(), pd.to_numeric(df_usd_money['Order_ID']).max(), pd.to_numeric(df_jpy_trade['Order_ID']).max(), pd.to_numeric(df_jpy_money['Order_ID']).max())
+                next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
+                
+                for _, row in edited_df.iterrows():
+                    item = row.to_dict()
+                    if item["Category"] == "USD_Trade":
+                        ws_usd_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
+                        next_id += 1
+                    elif item["Category"] == "USD_Dividend":
+                        ws_usd_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
+                        next_id += 1
+                    elif item["Category"] == "USD_Exchange":
+                        ws_usd_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
+                        next_id += 1
+                    elif item["Category"] == "Japan_Trade":
+                        ws_jpy_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
+                        next_id += 1
+                    elif item["Category"] == "Japan_Dividend":
+                        ws_jpy_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
+                        next_id += 1
+                    elif item["Category"] == "Japan_Exchange":
+                        ws_jpy_money.append_row([ item["Date"], int(next_id), "KRW_to_JPY", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
+                        next_id += 1
+                    elif item["Category"] == "Domestic_Trade":
+                        ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), "-", int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"] if item.get("Price") else item["Amount"]), item["Memo"] ])
+                    elif item["Category"] == "Domestic_Dividend":
+                        ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), "-", 0, 0, float(item["Amount"]), item["Memo"] ])
+                    
+                st.success(f"✅ {len(edited_df)}건 DB 최종 저장 완료! 시세를 재동기화합니다.")
+                st.session_state['parsed_data'] = [] # Staging Area 초기화
+                st.cache_data.clear() 
+                st.session_state['needs_fetch'] = True 
+                time.sleep(1.5)
+                st.rerun()
 
     with tab_detail:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
