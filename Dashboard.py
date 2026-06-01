@@ -9,7 +9,7 @@ import yfinance as yf
 import KIS_API_Manager as kis
 
 # -------------------------------------------------------------------
-# [1] 설정 & 다크모드
+# [1] 설정 & 다크모드 (에러 팝업 영구 차단 CSS 추가)
 # -------------------------------------------------------------------
 st.set_page_config(page_title="Investment Command", layout="wide", page_icon="🏦")
 
@@ -37,6 +37,10 @@ st.markdown(f"""
     .txt-red {{ color: {COLOR_RED} !important; }}
     .txt-blue {{ color: {COLOR_BLUE} !important; }}
     .txt-sub {{ color: {THEME_SUB} !important; }}
+    
+    /* 🔥 404 Connection Error 등 스트림릿 모달 팝업 강제 숨김 처리 */
+    div[data-testid="stModal"] {{ display: none !important; }}
+    div[data-testid="stConnectionStatus"] {{ display: none !important; }}
     
     .stock-card {{ background-color: {THEME_CARD}; border-radius: 16px; padding: 20px; margin-bottom: 16px; border: 1px solid {THEME_BORDER}; border-left: 6px solid #555; }}
     .card-up {{ border-left-color: {COLOR_RED} !important; }}
@@ -116,7 +120,7 @@ def load_data():
     return df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 계산 엔진 (1 JPY 기반 정밀 연산)
+# [4] 계산 엔진
 # -------------------------------------------------------------------
 def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
     df_t = df_t_raw.copy()
@@ -340,63 +344,89 @@ def main():
     usd_div_total_for = 0.0
     jpy_div_total_for = 0.0
     
+    # ----------------------------------------------------------
+    # 자산급 분리 연산 (US 자산 / JP 자산 / KRW 자산)
+    # ----------------------------------------------------------
+    us_stock_val_krw = 0.0
+    jp_stock_val_krw = 0.0
+    
     for tk, data in portfolio.items():
         if data['currency'] == 'USD': usd_div_total_for += data['accum_div_for']
         elif data['currency'] == 'JPY': jpy_div_total_for += data['accum_div_for']
 
         if data['qty'] > 0:
             cur_p = prices.get(tk, 0)
-            if data['currency'] == 'KRW': total_stock_val_krw += data['qty'] * cur_p
-            elif data['currency'] == 'USD': total_stock_val_krw += data['qty'] * cur_p * cur_usd_rate
-            elif data['currency'] == 'JPY': total_stock_val_krw += data['qty'] * cur_p * cur_jpy_rate
+            if data['currency'] == 'KRW': 
+                total_stock_val_krw += data['qty'] * cur_p
+            elif data['currency'] == 'USD': 
+                val_krw = data['qty'] * cur_p * cur_usd_rate
+                total_stock_val_krw += val_krw
+                us_stock_val_krw += val_krw
+            elif data['currency'] == 'JPY': 
+                val_krw = data['qty'] * cur_p * cur_jpy_rate
+                total_stock_val_krw += val_krw
+                jp_stock_val_krw += val_krw
 
     cash_val_krw = (usd_bal * cur_usd_rate) + (jpy_bal * cur_jpy_rate) + dom_cash
     total_asset_krw = total_stock_val_krw + cash_val_krw
     total_pl_krw = total_asset_krw - total_principal_all
     total_pl_pct = (total_pl_krw / total_principal_all * 100) if total_principal_all > 0 else 0
+    total_is_plus = total_pl_krw >= 0
+
+    # 누적 실현손익 합산
+    total_realized_sum = sum(d['realized_krw'] for d in portfolio.values())
+    total_div_sum_krw = sum(d['accum_div_krw'] if d['currency']=='KRW' else d['accum_div_for']*(cur_usd_rate if d['currency']=='USD' else cur_jpy_rate) for d in portfolio.values())
+    total_real_div_fx = total_realized_sum + total_div_sum_krw + usd_fx_real + jpy_fx_real
+
+    # US Asset 계산
+    us_asset_krw = us_stock_val_krw + (usd_bal * cur_usd_rate)
+    us_pl_krw = us_asset_krw - usd_krw_sum
+    us_pl_pct = (us_pl_krw / usd_krw_sum * 100) if usd_krw_sum > 0 else 0
+    us_is_plus = us_pl_krw >= 0
+    us_realized_sum = sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'USD') + (usd_div_total_for * cur_usd_rate) + usd_fx_real
     
     usd_bep_num = usd_krw_sum - sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'USD') - (usd_div_total_for * cur_usd_rate)
     usd_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if d['currency'] == 'USD') + usd_bal
     usd_bep = (usd_bep_num / usd_assets) if usd_assets > 0 else 0.0
     usd_margin = cur_usd_rate - usd_bep
 
+    # JP Asset 계산
+    jp_asset_krw = jp_stock_val_krw + (jpy_bal * cur_jpy_rate)
+    jp_pl_krw = jp_asset_krw - jpy_krw_sum
+    jp_pl_pct = (jp_pl_krw / jpy_krw_sum * 100) if jpy_krw_sum > 0 else 0
+    jp_is_plus = jp_pl_krw >= 0
+    jp_realized_sum = sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'JPY') + (jpy_div_total_for * cur_jpy_rate) + jpy_fx_real
+
     jpy_bep_num = jpy_krw_sum - sum(d['realized_krw'] for d in portfolio.values() if d['currency'] == 'JPY') - (jpy_div_total_for * cur_jpy_rate)
     jpy_assets = sum(d['qty'] * prices.get(tk,0) for tk, d in portfolio.items() if d['currency'] == 'JPY') + jpy_bal
     jpy_bep = (jpy_bep_num / jpy_assets) if jpy_assets > 0 else 0.0
     jpy_margin = cur_jpy_rate - jpy_bep
 
-    # [수정] HTML 줄바꿈(Enter)으로 인한 </div> 태그 노출 현상 완벽 차단
-    usd_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{usd_fx_real:,.0f}원</span>" if usd_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {usd_fx_real:,.0f}원</span>" if usd_fx_real < 0 else "")
-    jpy_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{jpy_fx_real:,.0f}원</span>" if jpy_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {jpy_fx_real:,.0f}원</span>" if jpy_fx_real < 0 else "")
-
     if is_skeleton:
         top_asset_str = "로딩중..." if st.session_state.get('needs_fetch') else "시세 API 점검중"
-        top_pl_str = "-"; top_usd_margin_str = "-"; top_usd_bep_str = "-"; top_jpy_margin_str = "-"; top_jpy_bep_str = "-"
-        card_cls_main = "stock-card card-neutral"; usd_card_cls = "stock-card card-neutral"; jpy_card_cls = "stock-card card-neutral"
-        txt_cls = "txt-sub"; usd_txt_cls = "txt-sub"; jpy_txt_cls = "txt-sub"
-        jpy_rate_disp = 0; jpy_bep_disp = 0
+        top_pl_str = "-"; us_pl_str = "-"; jp_pl_str = "-"
+        top_usd_margin_str = "-"; top_usd_bep_str = "-"; top_jpy_margin_str = "-"; top_jpy_bep_str = "-"
+        card_cls_tot = "stock-card card-neutral"; card_cls_us = "stock-card card-neutral"; card_cls_jp = "stock-card card-neutral"
+        txt_cls_tot = "txt-sub"; txt_cls_us = "txt-sub"; txt_cls_jp = "txt-sub"
     else:
         top_asset_str = f"₩ {total_asset_krw:,.0f}"
-        is_plus = total_pl_krw >= 0
-        top_pl_str = f"{'▲' if is_plus else '▼'} {abs(total_pl_krw):,.0f} ({total_pl_pct:+.2f}%)"
+        top_pl_str = f"{'▲' if total_is_plus else '▼'} {abs(total_pl_krw):,.0f} ({'+' if total_is_plus else ''}{total_pl_pct:.2f}%)"
+        us_pl_str = f"{'▲' if us_is_plus else '▼'} {abs(us_pl_krw):,.0f} ({'+' if us_is_plus else ''}{us_pl_pct:.2f}%)"
+        jp_pl_str = f"{'▲' if jp_is_plus else '▼'} {abs(jp_pl_krw):,.0f} ({'+' if jp_is_plus else ''}{jp_pl_pct:.2f}%)"
         
         top_usd_margin_str = f"{'+' if usd_margin >= 0 else ''}{usd_margin:,.2f} 원" if usd_assets > 0 else "-"
         top_usd_bep_str = f"₩ {usd_bep:,.2f}" if usd_assets > 0 else "-"
-        
-        # [수정] 엔화는 100엔 기준으로 UI 표기 스케일링
-        jpy_rate_disp = jpy_rate * 100
-        jpy_bep_disp = jpy_bep * 100
-        jpy_margin_disp = jpy_margin * 100
-        top_jpy_margin_str = f"{'+' if jpy_margin_disp >= 0 else ''}{jpy_margin_disp:,.2f} 원 (100엔)" if jpy_assets > 0 else "-"
-        top_jpy_bep_str = f"₩ {jpy_bep_disp:,.2f}" if jpy_assets > 0 else "-"
+        # [수정] 1엔 단위 4자리 표기 원복
+        top_jpy_margin_str = f"{'+' if jpy_margin >= 0 else ''}{jpy_margin:,.4f} 원" if jpy_assets > 0 else "-"
+        top_jpy_bep_str = f"₩ {jpy_bep:,.4f}" if jpy_assets > 0 else "-"
 
-        card_cls_main = f"stock-card {'card-up' if is_plus else 'card-down'}"
-        usd_card_cls = f"stock-card {'card-up' if usd_margin >= 0 else 'card-down'}" if usd_assets > 0 else "stock-card card-neutral"
-        jpy_card_cls = f"stock-card {'card-up' if jpy_margin_disp >= 0 else 'card-down'}" if jpy_assets > 0 else "stock-card card-neutral"
+        card_cls_tot = f"stock-card {'card-up' if total_is_plus else 'card-down'}"
+        card_cls_us = f"stock-card {'card-up' if us_is_plus else 'card-down'}" if usd_krw_sum > 0 else "stock-card card-neutral"
+        card_cls_jp = f"stock-card {'card-up' if jp_is_plus else 'card-down'}" if jpy_krw_sum > 0 else "stock-card card-neutral"
         
-        txt_cls = "txt-red" if is_plus else "txt-blue"
-        usd_txt_cls = "txt-red" if usd_margin >= 0 else "txt-blue"
-        jpy_txt_cls = "txt-red" if jpy_margin_disp >= 0 else "txt-blue"
+        txt_cls_tot = "txt-red" if total_is_plus else "txt-blue"
+        txt_cls_us = "txt-red" if us_is_plus else "txt-blue"
+        txt_cls_jp = "txt-red" if jp_is_plus else "txt-blue"
 
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
@@ -405,43 +435,105 @@ def main():
             st.session_state['needs_fetch'] = True
             st.rerun()
 
+    # -------------------------------------------------------------------
+    # [새로운 KPI: 국가별 자산(US/JP) 격상 및 상세 버튼 추가]
+    # -------------------------------------------------------------------
     kpi_cols = st.columns(3)
     with kpi_cols[0]:
         st.markdown(f"""
-        <div class="{card_cls_main}">
+        <div class="{card_cls_tot}">
             <div class="card-header"><span class="card-ticker">총 자산</span><span class="card-price">Total Assets</span></div>
             <div class="card-main-val">{top_asset_str}</div>
-            <div class="card-sub-box {txt_cls}">{top_pl_str}</div>
+            <div class="card-sub-box {txt_cls_tot}">{top_pl_str}</div>
+            <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세 (DB)</summary>
+                <table style="width:100%; font-size:0.8rem; color:#ccc;">
+                    <tr><td>총 투입 원금</td><td style="text-align:right;">₩ {total_principal_all:,.0f}</td></tr>
+                    <tr><td>주식 평가액</td><td style="text-align:right;">₩ {total_stock_val_krw:,.0f}</td></tr>
+                    <tr><td>예수금 총액</td><td style="text-align:right;">₩ {cash_val_krw:,.0f}</td></tr>
+                    <tr><td style="color:#A8C7FA">누적 실현/배당</td><td style="text-align:right;">₩ {total_real_div_fx:,.0f}</td></tr>
+                </table>
+            </details>
         </div>
         """, unsafe_allow_html=True)
     with kpi_cols[1]:
         st.markdown(f"""
-        <div class="{usd_card_cls}">
-            <div class="card-header"><span class="card-ticker">달러 잔고</span><span class="card-price">USD Command</span></div>
-            <div class="card-main-val">$ {usd_bal:,.2f}</div>
-            <div class="card-sub-box">
-                <span style="color:#888; font-weight:400;">매수평단 ₩ {usd_rate:,.2f}</span><br>
-                <span style="color:#888; font-weight:400;">BEP {top_usd_bep_str}</span><br>
-                <span class="{usd_txt_cls if usd_assets > 0 else 'txt-sub'}">마진 {top_usd_margin_str}</span>{usd_fx_text}
-            </div>
+        <div class="{card_cls_us}">
+            <div class="card-header"><span class="card-ticker">미국 자산</span><span class="card-price">US Assets</span></div>
+            <div class="card-main-val">₩ {us_asset_krw:,.0f}</div>
+            <div class="card-sub-box {txt_cls_us if usd_krw_sum > 0 else 'txt-sub'}">{us_pl_str if usd_krw_sum > 0 else '-'}</div>
+            <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세 (DB)</summary>
+                <table style="width:100%; font-size:0.8rem; color:#ccc;">
+                    <tr><td>투입 원금</td><td style="text-align:right;">₩ {usd_krw_sum:,.0f}</td></tr>
+                    <tr><td style="color:#A8C7FA">누적 실현/배당</td><td style="text-align:right;">₩ {us_realized_sum:,.0f}</td></tr>
+                    <tr><td>BEP 환율</td><td style="text-align:right;">{top_usd_bep_str}</td></tr>
+                    <tr><td style="color:#AAA">안전마진</td><td style="text-align:right;">{top_usd_margin_str}</td></tr>
+                </table>
+            </details>
         </div>
         """, unsafe_allow_html=True)
     with kpi_cols[2]:
         st.markdown(f"""
-        <div class="{jpy_card_cls}">
-            <div class="card-header"><span class="card-ticker">엔화 잔고</span><span class="card-price">JPY Command</span></div>
-            <div class="card-main-val">¥ {jpy_bal:,.0f}</div>
-            <div class="card-sub-box">
-                <span style="color:#888; font-weight:400;">매수평단 ₩ {jpy_rate_disp:,.2f} (100엔)</span><br>
-                <span style="color:#888; font-weight:400;">BEP {top_jpy_bep_str}</span><br>
-                <span class="{jpy_txt_cls if jpy_assets > 0 else 'txt-sub'}">마진 {top_jpy_margin_str}</span>{jpy_fx_text}
-            </div>
+        <div class="{card_cls_jp}">
+            <div class="card-header"><span class="card-ticker">일본 자산</span><span class="card-price">JP Assets</span></div>
+            <div class="card-main-val">₩ {jp_asset_krw:,.0f}</div>
+            <div class="card-sub-box {txt_cls_jp if jpy_krw_sum > 0 else 'txt-sub'}">{jp_pl_str if jpy_krw_sum > 0 else '-'}</div>
+            <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세 (DB)</summary>
+                <table style="width:100%; font-size:0.8rem; color:#ccc;">
+                    <tr><td>투입 원금</td><td style="text-align:right;">₩ {jpy_krw_sum:,.0f}</td></tr>
+                    <tr><td style="color:#A8C7FA">누적 실현/배당</td><td style="text-align:right;">₩ {jp_realized_sum:,.0f}</td></tr>
+                    <tr><td>BEP 환율</td><td style="text-align:right;">{top_jpy_bep_str}</td></tr>
+                    <tr><td style="color:#AAA">안전마진</td><td style="text-align:right;">{top_jpy_margin_str}</td></tr>
+                </table>
+            </details>
         </div>
         """, unsafe_allow_html=True)
 
     tab_dash, tab_input, tab_detail, tab_log = st.tabs(["📊 대시보드", "🕹️ 입력 매니저", "📋 통합 상세", "📜 통합 로그"])
     
     with tab_dash:
+        # -------------------------------------------------------------------
+        # [예수금 큐브의 대시보드 격하 및 배치]
+        # -------------------------------------------------------------------
+        st.caption("**🏦 예수금 (Cash)** Sector")
+        cash_cols = st.columns(3)
+        with cash_cols[0]:
+            st.markdown(f"""
+            <div class="stock-card {'card-up' if usd_margin >= 0 else 'card-down'}" style="margin-bottom: 0;">
+                <div class="card-header"><span class="card-ticker">달러 잔고</span><span class="card-price">USD Cash</span></div>
+                <div class="card-main-val">$ {usd_bal:,.2f}</div>
+                <div class="card-sub-box">
+                    <span style="color:#888; font-weight:400;">매수평단 ₩ {usd_rate:,.2f}</span><br>
+                    <span style="color:#888; font-weight:400;">BEP {top_usd_bep_str}</span><br>
+                    <span class="{'txt-red' if usd_margin >= 0 else 'txt-blue'}">마진 {top_usd_margin_str}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with cash_cols[1]:
+            st.markdown(f"""
+            <div class="stock-card {'card-up' if jpy_margin >= 0 else 'card-down'}" style="margin-bottom: 0;">
+                <div class="card-header"><span class="card-ticker">엔화 잔고</span><span class="card-price">JPY Cash</span></div>
+                <div class="card-main-val">¥ {jpy_bal:,.0f}</div>
+                <div class="card-sub-box">
+                    <span style="color:#888; font-weight:400;">매수평단 ₩ {jpy_rate:,.4f}</span><br>
+                    <span style="color:#888; font-weight:400;">BEP {top_jpy_bep_str}</span><br>
+                    <span class="{'txt-red' if jpy_margin >= 0 else 'txt-blue'}">마진 {top_jpy_margin_str}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with cash_cols[2]:
+            st.markdown(f"""
+            <div class="stock-card card-neutral" style="margin-bottom: 0;">
+                <div class="card-header"><span class="card-ticker">원화 잔고</span><span class="card-price">KRW Cash</span></div>
+                <div class="card-main-val">₩ {dom_cash:,.0f}</div>
+                <div class="card-sub-box">
+                    <br><br>
+                    <span class="txt-sub">-</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("<hr style='margin: 10px 0 25px 0; border-color: #333;'>", unsafe_allow_html=True)
+
         for sec in ['배당', '테크', '의료', '리츠', '기타']:
             target_list = SECTOR_ORDER_LIST.get(sec, [])
             if sec == '기타':
@@ -482,7 +574,8 @@ def main():
                         total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
                         bep_rate_tk = (invested_krw - data['realized_krw'] - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
                         margin_tk = fx - bep_rate_tk
-                        margin_tk_str = f"{margin_tk*100:+.2f} 원 (100엔)" if data['currency'] == 'JPY' else f"{margin_tk:+.1f} 원"
+                        # [수정] 1엔 단위 소수점 4자리 적용
+                        margin_tk_str = f"{margin_tk:+.4f} 원" if data['currency'] == 'JPY' else f"{margin_tk:+.2f} 원"
                         price_display = f"${cur_p:.2f}" if data['currency'] == 'USD' else f"¥ {cur_p:,.0f}"
 
                     total_ret = (total_pl_tk / invested_krw * 100) if invested_krw > 0 else 0
@@ -510,7 +603,7 @@ def main():
                 cols[idx % 4].markdown(html, unsafe_allow_html=True)
 
     # -------------------------------------------------------------------
-    # [입력 매니저: 임시 카드 UI (환전 입력창 분리 완벽 적용)]
+    # [입력 매니저]
     # -------------------------------------------------------------------
     with tab_input:
         st.info("💡 카톡 메시지를 분석한 뒤, 임시 카드에서 오차(세금 등)를 수정하고 DB로 전송합니다.")
@@ -553,10 +646,9 @@ def main():
                     with cols[1]:
                         item['Qty'] = st.number_input("수량(Qty)", value=float(item['Qty']), key=f"qty_{i}")
                     with cols[2]:
-                        # [버그 수정 1] 환전 시 외화액과 원화액을 '독립된 입력창'으로 제공하여 덮어쓰기 원천 차단
                         if 'Exchange' in item['Category']:
-                            item['Price'] = st.number_input("외화 획득/매도량", value=float(item['Price']), key=f"f_{i}")
-                            item['Amount'] = st.number_input("원화 투입/회수량", value=float(item['Amount']), key=f"k_{i}")
+                            item['Price'] = st.number_input("외화액", value=float(item['Price']), key=f"f_{i}")
+                            item['Amount'] = st.number_input("원화액", value=float(item['Amount']), key=f"k_{i}")
                         elif 'Domestic_Dividend' == item['Category']:
                             item['Amount'] = st.number_input("배당금(₩)", value=float(item['Amount']), key=f"k_{i}")
                         else:
@@ -621,7 +713,7 @@ def main():
                 st.rerun()
 
     # -------------------------------------------------------------------
-    # [통합 상세 테이블]
+    # [통합 상세 테이블: 실현+배당 열에 FX 환차익 이관]
     # -------------------------------------------------------------------
     with tab_detail:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
@@ -660,24 +752,29 @@ def main():
                 else: price_profit = 0; fx_profit_str = "-"
                 
                 bep_tk = (data['invested_krw'] - (data['realized_krw'] + div_krw)) / (qty * cur_p) if (qty*cur_p) > 0 else 0.0
-                margin_str = f"{fx - bep_tk:+.1f}" if qty > 0 else "-"
+                margin_str = f"{fx - bep_tk:+.4f}" if qty > 0 else "-"
 
             sum_eval_krw += eval_krw; sum_realized += (data['realized_krw'] + div_krw)
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
             rows_html += f"<tr><td>{display_name}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['currency']=='KRW' else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:#ccc;'>{margin_str}</td></tr>"
             
+        # 외화 예수금 행 추가 (잔고가 있거나, 환전 실현손익이 존재할 경우에만 표시)
         if not is_skeleton:
-            if usd_bal > 0:
+            if usd_bal > 0 or usd_fx_real != 0:
                 usd_cash_eval = usd_bal * cur_usd_rate
                 usd_cash_fx = usd_cash_eval - (usd_bal * usd_rate)
                 cls_usd = "txt-red" if usd_cash_fx >= 0 else "txt-blue"
-                rows_html += f"<tr style='background-color:#1c1d1f; color:#999; font-style:italic;'><td>💵 USD 예수금</td><td>{usd_cash_eval:,.0f}</td><td>-</td><td class='{cls_usd}'>{usd_cash_fx:,.0f}</td><td>-</td><td class='{cls_usd}'><b>{usd_cash_fx:,.0f}</b></td><td>-</td></tr>"
+                usd_cash_total_pl = usd_cash_fx + usd_fx_real
+                cls_usd_tot = "txt-red" if usd_cash_total_pl >= 0 else "txt-blue"
+                rows_html += f"<tr style='background-color:#1c1d1f; color:#999; font-style:italic;'><td>💵 USD 예수금</td><td>{usd_cash_eval:,.0f}</td><td>-</td><td class='{cls_usd}'>{usd_cash_fx:,.0f}</td><td class='{'txt-red' if usd_fx_real>=0 else 'txt-blue' if usd_fx_real<0 else 'txt-sub'}'>{usd_fx_real:,.0f}</td><td class='{cls_usd_tot}'><b>{usd_cash_total_pl:,.0f}</b></td><td>-</td></tr>"
             
-            if jpy_bal > 0:
+            if jpy_bal > 0 or jpy_fx_real != 0:
                 jpy_cash_eval = jpy_bal * cur_jpy_rate
                 jpy_cash_fx = jpy_cash_eval - (jpy_bal * jpy_rate)
                 cls_jpy = "txt-red" if jpy_cash_fx >= 0 else "txt-blue"
-                rows_html += f"<tr style='background-color:#1c1d1f; color:#999; font-style:italic;'><td>💴 JPY 예수금</td><td>{jpy_cash_eval:,.0f}</td><td>-</td><td class='{cls_jpy}'>{jpy_cash_fx:,.0f}</td><td>-</td><td class='{cls_jpy}'><b>{jpy_cash_fx:,.0f}</b></td><td>-</td></tr>"
+                jpy_cash_total_pl = jpy_cash_fx + jpy_fx_real
+                cls_jpy_tot = "txt-red" if jpy_cash_total_pl >= 0 else "txt-blue"
+                rows_html += f"<tr style='background-color:#1c1d1f; color:#999; font-style:italic;'><td>💴 JPY 예수금</td><td>{jpy_cash_eval:,.0f}</td><td>-</td><td class='{cls_jpy}'>{jpy_cash_fx:,.0f}</td><td class='{'txt-red' if jpy_fx_real>=0 else 'txt-blue' if jpy_fx_real<0 else 'txt-sub'}'>{jpy_fx_real:,.0f}</td><td class='{cls_jpy_tot}'><b>{jpy_cash_total_pl:,.0f}</b></td><td>-</td></tr>"
 
             if dom_cash > 0:
                 rows_html += f"<tr style='background-color:#1c1d1f; color:#999; font-style:italic;'><td>🇰🇷 KRW 예수금</td><td>{dom_cash:,.0f}</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>"
@@ -687,7 +784,8 @@ def main():
         else:
             total_assets = sum_eval_krw + (usd_bal * cur_usd_rate) + (jpy_bal * cur_jpy_rate) + dom_cash
             final_pl_calc = total_assets - total_principal_all
-            total_row = f"<tr class='row-total'><td>TOTAL</td><td>{total_assets:,.0f}</td><td>-</td><td>-</td><td>{sum_realized:,.0f}</td><td class='{'txt-red' if final_pl_calc>=0 else 'txt-blue'}'>{final_pl_calc:,.0f}</td><td>-</td></tr>"
+            total_realized_sum_table = sum_realized + usd_fx_real + jpy_fx_real
+            total_row = f"<tr class='row-total'><td>TOTAL</td><td>{total_assets:,.0f}</td><td>-</td><td>-</td><td>{total_realized_sum_table:,.0f}</td><td class='{'txt-red' if final_pl_calc>=0 else 'txt-blue'}'>{final_pl_calc:,.0f}</td><td>-</td></tr>"
             
         st.markdown(header + rows_html + total_row + "</tbody></table>", unsafe_allow_html=True)
 
