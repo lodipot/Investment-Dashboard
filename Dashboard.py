@@ -116,7 +116,7 @@ def load_data():
     return df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 계산 엔진 (FX 실현손익 및 예수금 이동 통합)
+# [4] 계산 엔진 (외화 범용)
 # -------------------------------------------------------------------
 def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
     df_t = df_t_raw.copy()
@@ -139,50 +139,40 @@ def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
     
     balance = 0.0; avg_rate = 0.0
     krw_sum = 0.0
-    fx_realized = 0.0
-    withdrawn_krw = 0.0
     port = {} 
     
     for _, row in timeline.iterrows():
         source = row['Source']
         t_type = str(row.get('Type', '')).lower()
-        ticker = str(row.get('Ticker', '')).strip()
-        if ticker in ('', '-', 'nan'): ticker = 'Cash'
-            
-        if ticker != 'Cash' and ticker not in port:
-            port[ticker] = {'qty':0, 'invested_krw':0, 'invested_for':0, 'realized_krw':0, 'accum_div_for':0, 'accum_div_krw':0, 'currency':curr_label, 'raw_ticker':ticker, 'name': ''}
-            
-        name = str(row.get('Name', '')).strip()
-        if ticker != 'Cash' and name and name != '-' and name != ticker:
-            port[ticker]['name'] = name
         
         if source == 'Money':
             for_amt = safe_float(row.get('For_Amount'))
             krw_amt = safe_float(row.get('KRW_Amount'))
+            ticker = str(row.get('Ticker', '')).strip()
+            if ticker in ('', '-', 'nan'): ticker = 'Cash'
             
             if 'dividend' in t_type or '배당' in t_type:
-                if ticker != 'Cash': port[ticker]['accum_div_for'] += for_amt
-            elif 'to_krw' in t_type: 
-                # [핵심] 환전 매도 시: 매수 평단가로 계산된 순수 환차익 실현
-                if for_amt > 0:
-                    fx_realized += krw_amt - (for_amt * avg_rate)
-                    balance -= for_amt
-                    krw_sum -= krw_amt # 출금액만큼 원금 차감 (BEP 계산 보정)
-                    withdrawn_krw += krw_amt # 원화 예수금으로 이동시킬 금액
+                if ticker != 'Cash':
+                    if ticker not in port: port[ticker] = {'qty':0, 'invested_krw':0, 'invested_for':0, 'realized_krw':0, 'accum_div_for':0, 'accum_div_krw':0, 'currency':curr_label, 'raw_ticker':ticker}
+                    port[ticker]['accum_div_for'] += for_amt
             else:
-                # [핵심] 환전 매수 시: 평단가 갱신
                 if balance <= 0:
                     if for_amt > 0: avg_rate = krw_amt / for_amt
                 else:
                     if (balance + for_amt) > 0:
                         avg_rate = ((balance * avg_rate) + krw_amt) / (balance + for_amt)
-                balance += for_amt
+                
                 krw_sum += krw_amt
+                
+            balance += for_amt
 
         elif source == 'Trade':
             qty = safe_float(row.get('Qty'))
             price = safe_float(row.get('Price'))
             amount = qty * price
+            ticker = str(row.get('Ticker', '')).strip()
+            
+            if ticker not in port: port[ticker] = {'qty':0, 'invested_krw':0, 'invested_for':0, 'realized_krw':0, 'accum_div_for':0, 'accum_div_krw':0, 'currency':curr_label, 'raw_ticker':ticker}
             
             if 'buy' in t_type or '매수' in t_type:
                 balance -= amount
@@ -203,11 +193,11 @@ def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
                     port[ticker]['invested_krw'] -= (qty * unit_krw)
                     port[ticker]['invested_for'] -= (qty * unit_for)
 
-    return balance, avg_rate, krw_sum, port, fx_realized, withdrawn_krw
+    return balance, avg_rate, krw_sum, port
 
 def process_timeline(df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic):
-    usd_bal, usd_rate, usd_krw_sum, usd_port, usd_fx_real, usd_wd = process_foreign_currency(df_usd_trade, df_usd_money, 'USD')
-    jpy_bal, jpy_rate, jpy_krw_sum, jpy_port, jpy_fx_real, jpy_wd = process_foreign_currency(df_jpy_trade, df_jpy_money, 'JPY')
+    usd_bal, usd_rate, usd_krw_sum, usd_port = process_foreign_currency(df_usd_trade, df_usd_money, 'USD')
+    jpy_bal, jpy_rate, jpy_krw_sum, jpy_port = process_foreign_currency(df_jpy_trade, df_jpy_money, 'JPY')
     
     portfolio = {**usd_port, **jpy_port}
 
@@ -219,10 +209,9 @@ def process_timeline(df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_
         ticker = DOMESTIC_TICKER_MAP.get(raw_ticker, raw_ticker) 
         qty = safe_float(row.get('Qty'))
         amount_krw = safe_float(row.get('Amount_KRW'))
-        name = str(row.get('Name', '')).strip()
         
         if ticker not in portfolio and raw_ticker and raw_ticker != '-':
-            portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_for':0, 'realized_krw':0, 'accum_div_for':0, 'accum_div_krw':0, 'currency':'KRW', 'raw_ticker':raw_ticker, 'name': name}
+            portfolio[ticker] = {'qty':0, 'invested_krw':0, 'invested_for':0, 'realized_krw':0, 'accum_div_for':0, 'accum_div_krw':0, 'currency':'KRW', 'raw_ticker':raw_ticker}
             
         if 'buy' in t_type or '매수' in t_type:
             portfolio[ticker]['qty'] += qty; portfolio[ticker]['invested_krw'] += amount_krw; dom_cash -= amount_krw
@@ -240,83 +229,76 @@ def process_timeline(df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_
         elif 'withdraw' in t_type or '출금' in t_type:
             dom_cash -= amount_krw; dom_principal_sum -= amount_krw
 
-    # [수정] 외화 매도 시 환수된 원화를 국내 예수금 및 총 원금에 자동 반영 (자산 증발 방지)
-    dom_cash += (usd_wd + jpy_wd)
-    dom_principal_sum += (usd_wd + jpy_wd)
-
-    return usd_bal, usd_rate, usd_krw_sum, usd_fx_real, jpy_bal, jpy_rate, jpy_krw_sum, jpy_fx_real, dom_cash, dom_principal_sum, portfolio
+    return usd_bal, usd_rate, usd_krw_sum, jpy_bal, jpy_rate, jpy_krw_sum, dom_cash, dom_principal_sum, portfolio
 
 # -------------------------------------------------------------------
-# [5] 카톡 파서 (외화 매도/매수, 일본 주식 네이밍 & 당일 시간 픽스)
+# [5] 카톡 파서 (정규식 JPY 완벽 반영)
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
     base_year = base_date.year
     flat_text = text.replace('\n', ' ')
-    chunks = re.split(r'(?=\[한국투자증권 체결안내\]|최원준님|\[한국투자증권\]\s*\d{2}:\d{2}.*?외화매수환전|외화매도환전|ETF 결산분배금)', flat_text)
+    chunks = re.split(r'(?=\[한국투자증권 체결안내\]|최원준님|\[한국투자증권\]\s*\d{2}:\d{2}.*?외화매수환전|ETF 결산분배금)', flat_text)
 
     for chunk in chunks:
         if not chunk.strip(): continue
         try:
-            dom_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:현금(매수|매도)체결.*?\*종목명:(.*?)\(([\dA-Za-z]+)\).*?\*체결수량:([\d,]+).*?\*체결단가:([\d,]+)원', chunk)
+            # 국내 매수/매도
+            dom_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:현금(매수|매도)체결.*?\*종목명:.*?\(([\dA-Za-z]+)\).*?\*체결수량:([\d,]+).*?\*체결단가:([\d,]+)원', chunk)
             if dom_m:
-                t_str, t_dir, t_name, t_tkr, t_qty, t_prc = dom_m.groups()
+                t_str, t_dir, t_tkr, t_qty, t_prc = dom_m.groups()
                 t_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=int(t_str.split(':')[0]), minute=int(t_str.split(':')[1]))
-                parsed_list.append({ "Category": "Domestic_Trade", "Date": t_dt.strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Name": t_name.strip(), "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
+                parsed_list.append({ "Category": "Domestic_Trade", "Date": t_dt.strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
                 continue
                 
-            # [버그 수정] 일본 거래는 어제 밤 23:30이 아닌 "당일 실제 시간"으로 기록 (타임머신 방지)
-            jpy_tr_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:(매수|매도).*?\*종목명:([A-Za-z0-9.]+)/(.*?)\s*\*체결수량:([\d,]+).*?\*체결단가:JPY\s*([\d.,]+)', chunk)
+            # 일본 거래 (.T 자동 부착)
+            jpy_tr_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:(매수|매도).*?\*종목명:([A-Za-z0-9.]+)/.*?\*체결수량:([\d,]+).*?\*체결단가:JPY\s*([\d.,]+)', chunk)
             if jpy_tr_m:
-                t_str, t_dir, t_code, t_name, t_qty, t_prc = jpy_tr_m.groups()
-                t_dt = datetime.combine(base_date, datetime.min.time()).replace(hour=int(t_str.split(':')[0]), minute=int(t_str.split(':')[1]))
-                tkr_formatted = t_code.strip() + ".T"
-                parsed_list.append({ "Category": "Japan_Trade", "Date": t_dt.strftime("%Y-%m-%d %H:%M:%S"), "Ticker": tkr_formatted, "Name": t_name.strip(), "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
-                continue
-
-            usd_tr_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:(매수|매도).*?\*종목명:([A-Za-z0-9]+)(?:/(.*?))?\s*\*체결수량:([\d,]+).*?\*체결단가:USD\s*([\d.,]+)', chunk)
-            if usd_tr_m:
-                t_str, t_dir, t_code, t_name, t_qty, t_prc = usd_tr_m.groups()
+                t_str, t_dir, t_tkr, t_qty, t_prc = jpy_tr_m.groups()
                 final_dt = (datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)).strftime("%Y-%m-%d 23:30:00")
-                name_val = t_name.strip() if t_name else t_code.strip()
-                parsed_list.append({ "Category": "USD_Trade", "Date": final_dt, "Ticker": t_code.strip(), "Name": name_val, "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
+                tkr_formatted = t_tkr.strip() + ".T" if not t_tkr.strip().endswith(".T") else t_tkr.strip()
+                parsed_list.append({ "Category": "Japan_Trade", "Date": final_dt, "Ticker": tkr_formatted, "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
                 continue
 
+            # 미국 거래
+            usd_tr_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:(매수|매도).*?\*종목명:([A-Za-z0-9 ]+)(?:/|$).*?\*체결수량:([\d,]+).*?\*체결단가:USD\s*([\d.]+)', chunk)
+            if usd_tr_m:
+                t_str, t_dir, t_tkr, t_qty, t_prc = usd_tr_m.groups()
+                final_dt = (datetime.combine(base_date, datetime.min.time()) - timedelta(days=1)).strftime("%Y-%m-%d 23:30:00")
+                parsed_list.append({ "Category": "USD_Trade", "Date": final_dt, "Ticker": t_tkr.strip(), "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
+                continue
+
+            # 일본 배당
             jpy_div_m = re.search(r'최원준님\s*(\d{2}/\d{2}).*?([A-Z0-9.]+)/.*?JPY\s*([\d.]+)\s*세전배당입금', chunk)
             if jpy_div_m:
-                d_str, t_tkr, t_amt = jpy_div_m.groups(); m, d = map(int, d_str.split('/'))
-                parsed_list.append({ "Category": "Japan_Dividend", "Date": datetime(base_year, m, d, 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr.strip(), "Name": "", "Type": "Dividend", "Qty": 0, "Price": float(t_amt), "Amount": 0, "Memo": "카톡파싱_배당" })
+                d_str, t_tkr, t_amt = jpy_div_m.groups()
+                m, d = map(int, d_str.split('/'))
+                parsed_list.append({ "Category": "Japan_Dividend", "Date": datetime(base_year, m, d, 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr.strip(), "Type": "Dividend", "Qty": 0, "Price": float(t_amt), "Amount": 0, "Memo": "카톡파싱_배당" })
                 continue
 
+            # 미국 배당
             usd_div_m = re.search(r'최원준님\s*(\d{2}/\d{2}).*?([A-Z]+)/.*?USD\s*([\d.]+)\s*세전배당입금', chunk)
             if usd_div_m:
-                d_str, t_tkr, t_amt = usd_div_m.groups(); m, d = map(int, d_str.split('/'))
-                parsed_list.append({ "Category": "USD_Dividend", "Date": datetime(base_year, m, d, 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr.strip(), "Name": "", "Type": "Dividend", "Qty": 0, "Price": float(t_amt), "Amount": 0, "Memo": "카톡파싱_배당" })
+                d_str, t_tkr, t_amt = usd_div_m.groups()
+                m, d = map(int, d_str.split('/'))
+                parsed_list.append({ "Category": "USD_Dividend", "Date": datetime(base_year, m, d, 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr.strip(), "Type": "Dividend", "Qty": 0, "Price": float(t_amt), "Amount": 0, "Memo": "카톡파싱_배당" })
                 continue
 
+            # 국내 배당
             dom_div_m = re.search(r'ETF 결산분배금 입금 안내.*?\*\s*종목명\s*:\s*(.*?)\s*\*.*?\*\s*입금액\s*:\s*([\d,]+)원.*?\*\s*입금일자\s*:\s*(\d{4})년\s*(\d{2})월\s*(\d{2})일', chunk)
             if dom_div_m:
                 t_name, t_amt, y, m, d = dom_div_m.groups()
                 t_tkr = {'TIGER 미국배당다우존스': '458730'}.get(t_name.strip(), t_name.strip())
-                parsed_list.append({ "Category": "Domestic_Dividend", "Date": datetime(int(y), int(m), int(d), 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Name": t_name.strip(), "Type": "Dividend", "Qty": 0, "Price": 0, "Amount": float(t_amt.replace(',', '')), "Memo": "카톡파싱_국내배당" })
+                parsed_list.append({ "Category": "Domestic_Dividend", "Date": datetime(int(y), int(m), int(d), 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Type": "Dividend", "Qty": 0, "Price": 0, "Amount": float(t_amt.replace(',', '')), "Memo": "카톡파싱_국내배당" })
                 continue
 
-            # [수정] 매수 환전 인식
-            buy_ex_m = re.search(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?(JPY|USD)\s*([0-9,.]+)', chunk)
-            if buy_ex_m:
-                k_amt, ex_rt, currency, u_amt = buy_ex_m.groups()
+            # 일본/미국 통합 환전 감지
+            ex_m = re.search(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?(JPY|USD)\s*([0-9,.]+)', chunk)
+            if ex_m:
+                k_amt, ex_rt, currency, u_amt = ex_m.groups()
                 cat = "Japan_Exchange" if currency == "JPY" else "USD_Exchange"
-                c_type = f"KRW_to_{currency}"
-                parsed_list.append({ "Category": cat, "Date": datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": "-", "Name": "", "Type": c_type, "Qty": 0, "Price": float(u_amt.replace(',', '')), "Amount": float(k_amt.replace(',', '')), "Memo": "카톡파싱_매수환전" })
-                continue
-                
-            # [수정] 매도 환전 인식 (수익 실현)
-            sell_ex_m = re.search(r'외화매도환전.*?(JPY|USD)\s*([0-9,.]+).*?@([0-9,.]+).*?￦([0-9,]+)', chunk)
-            if sell_ex_m:
-                currency, u_amt, ex_rt, k_amt = sell_ex_m.groups()
-                cat = "Japan_Exchange" if currency == "JPY" else "USD_Exchange"
-                c_type = f"{currency}_to_KRW"
-                parsed_list.append({ "Category": cat, "Date": datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": "-", "Name": "", "Type": c_type, "Qty": 0, "Price": float(u_amt.replace(',', '')), "Amount": float(k_amt.replace(',', '')), "Memo": "카톡파싱_매도환전" })
+                c_type = "KRW_to_JPY" if currency == "JPY" else "KRW_to_USD"
+                parsed_list.append({ "Category": cat, "Date": datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": "-", "Type": c_type, "Qty": 0, "Price": float(u_amt.replace(',', '')), "Amount": float(k_amt.replace(',', '')), "Memo": "카톡파싱_환전" })
                 continue
         except: continue
         
@@ -332,7 +314,7 @@ def main():
     except Exception as e:
         st.error(f"🚨 DB 로딩 실패: {e}"); st.stop()
         
-    usd_bal, usd_rate, usd_krw_sum, usd_fx_real, jpy_bal, jpy_rate, jpy_krw_sum, jpy_fx_real, dom_cash, dom_principal_sum, portfolio = process_timeline(*dfs)
+    usd_bal, usd_rate, usd_krw_sum, jpy_bal, jpy_rate, jpy_krw_sum, dom_cash, dom_principal_sum, portfolio = process_timeline(*dfs)
     
     prices = st.session_state.get('price_cache', {})
     cur_usd_rate = st.session_state.get('fx_rate_usd', 0.0)
@@ -352,9 +334,12 @@ def main():
 
         if data['qty'] > 0:
             cur_p = prices.get(tk, 0)
-            if data['currency'] == 'KRW': total_stock_val_krw += data['qty'] * cur_p
-            elif data['currency'] == 'USD': total_stock_val_krw += data['qty'] * cur_p * cur_usd_rate
-            elif data['currency'] == 'JPY': total_stock_val_krw += data['qty'] * cur_p * cur_jpy_rate
+            if data['currency'] == 'KRW':
+                total_stock_val_krw += data['qty'] * cur_p
+            elif data['currency'] == 'USD':
+                total_stock_val_krw += data['qty'] * cur_p * cur_usd_rate
+            elif data['currency'] == 'JPY':
+                total_stock_val_krw += data['qty'] * cur_p * cur_jpy_rate
 
     cash_val_krw = (usd_bal * cur_usd_rate) + (jpy_bal * cur_jpy_rate) + dom_cash
     total_asset_krw = total_stock_val_krw + cash_val_krw
@@ -371,15 +356,20 @@ def main():
     jpy_bep = (jpy_bep_num / jpy_assets) if jpy_assets > 0 else 0.0
     jpy_margin = cur_jpy_rate - jpy_bep
 
-    # 환전 실현손익 UI 텍스트 준비
-    usd_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{usd_fx_real:,.0f}원</span>" if usd_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {usd_fx_real:,.0f}원</span>" if usd_fx_real < 0 else "")
-    jpy_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{jpy_fx_real:,.0f}원</span>" if jpy_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {jpy_fx_real:,.0f}원</span>" if jpy_fx_real < 0 else "")
-
     if is_skeleton:
         top_asset_str = "로딩중..." if st.session_state.get('needs_fetch') else "시세 API 점검중"
-        top_pl_str = "-"; top_usd_margin_str = "-"; top_usd_bep_str = "-"; top_jpy_margin_str = "-"; top_jpy_bep_str = "-"
-        card_cls_main = "stock-card card-neutral"; usd_card_cls = "stock-card card-neutral"; jpy_card_cls = "stock-card card-neutral"
-        txt_cls = "txt-sub"; usd_txt_cls = "txt-sub"; jpy_txt_cls = "txt-sub"
+        top_pl_str = "-"
+        top_usd_margin_str = "-"
+        top_usd_bep_str = "-"
+        top_jpy_margin_str = "-"
+        top_jpy_bep_str = "-"
+        
+        card_cls_main = "stock-card card-neutral"
+        usd_card_cls = "stock-card card-neutral"
+        jpy_card_cls = "stock-card card-neutral"
+        txt_cls = "txt-sub"
+        usd_txt_cls = "txt-sub"
+        jpy_txt_cls = "txt-sub"
     else:
         top_asset_str = f"₩ {total_asset_krw:,.0f}"
         is_plus = total_pl_krw >= 0
@@ -423,7 +413,6 @@ def main():
                 <span style="color:#888; font-weight:400;">매수평단 ₩ {usd_rate:,.2f}</span><br>
                 <span style="color:#888; font-weight:400;">BEP {top_usd_bep_str}</span><br>
                 <span class="{usd_txt_cls if usd_assets > 0 else 'txt-sub'}">마진 {top_usd_margin_str}</span>
-                {usd_fx_text if usd_fx_real != 0 else ''}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -436,7 +425,6 @@ def main():
                 <span style="color:#888; font-weight:400;">매수평단 ₩ {jpy_rate:,.2f}</span><br>
                 <span style="color:#888; font-weight:400;">BEP {top_jpy_bep_str}</span><br>
                 <span class="{jpy_txt_cls if jpy_assets > 0 else 'txt-sub'}">마진 {top_jpy_margin_str}</span>
-                {jpy_fx_text if jpy_fx_real != 0 else ''}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -457,14 +445,6 @@ def main():
             for idx, tk in enumerate(valid_tickers):
                 data = portfolio[tk]; qty = data['qty']; cur_p = prices.get(tk, 0)
                 
-                # [수정] 일본 종목명 표기법 자동 조합 (예: 닌텐도(7974))
-                display_name = tk
-                if data['currency'] == 'JPY':
-                    n = data.get('name', '')
-                    base_tk = tk.replace('.T', '')
-                    if n and n != tk and n != base_tk and n != '-': display_name = f"{n}({base_tk})"
-                    else: display_name = base_tk
-
                 invested_krw = data['invested_krw']
                 div_krw = data['accum_div_krw'] if data['currency'] == 'KRW' else data['accum_div_for'] * (cur_usd_rate if data['currency'] == 'USD' else cur_jpy_rate)
                 
@@ -497,7 +477,7 @@ def main():
 
                 html = f"""
                 <div class="{card_cls_tk}">
-                    <div class="card-header"><span class="card-ticker">{display_name}</span><span class="card-price">{price_display}</span></div>
+                    <div class="card-header"><span class="card-ticker">{tk}</span><span class="card-price">{price_display}</span></div>
                     <div class="card-main-val">{val_krw_str}</div>
                     <div class="card-sub-box {txt_cls_tk}">{pl_str}</div>
                     <details><summary style="text-align:right; font-size:0.8rem; color:#888; cursor:pointer;">상세 (DB)</summary>
@@ -513,10 +493,10 @@ def main():
                 cols[idx % 4].markdown(html, unsafe_allow_html=True)
 
     # -------------------------------------------------------------------
-    # [입력 매니저: 임시 카드 폼팩터 도입 (Human-in-the-Loop)]
+    # [입력 매니저: 임시 카드 UI 및 Human-in-the-Loop]
     # -------------------------------------------------------------------
     with tab_input:
-        st.info("💡 카톡 메시지를 쏟아붓고 분석한 뒤, 임시 카드에서 오차(세금 등)를 수정하고 DB로 일괄 전송합니다.")
+        st.info("💡 카톡 메시지를 분석한 뒤, 임시 카드에서 오차(세금 등)를 직접 수정하고 DB에 일괄 저장합니다.")
         c1, c2 = st.columns([1, 2])
         with c1: ref_date = st.date_input("기준 날짜 (카톡 수신일)", datetime.now())
         with c2: raw_text = st.text_area("카톡 내용 붙여넣기", height=120, placeholder="[한국투자증권 체결안내]08:05...")
@@ -526,6 +506,7 @@ def main():
                 parsed_items = parse_kakaotalk_final(raw_text, ref_date)
                 if parsed_items:
                     for item in parsed_items:
+                        # 해외 배당 원천징수 자동 선반영
                         if item["Category"] == "USD_Dividend":
                             item["Price"] = round(item["Price"] * 0.85, 2)
                             item["Memo"] += " (미국 15% 세금추정)"
@@ -539,20 +520,20 @@ def main():
         if st.session_state['parsed_data']:
             st.markdown("---")
             cc1, cc2 = st.columns([3, 1])
-            with cc1: st.subheader("📝 검수 대기열 (수정 가능)")
+            with cc1: st.subheader("📝 검수 대기열 (수정 후 저장하세요)")
             with cc2:
                 if st.button("🗑️ 전체 취소", use_container_width=True):
                     st.session_state['parsed_data'] = []
                     st.rerun()
 
+            # 임시 카드 형태의 편집 UI
             for i, item in enumerate(st.session_state['parsed_data']):
                 with st.container():
                     st.markdown("<div class='input-card'>", unsafe_allow_html=True)
                     cols = st.columns([2, 1, 1.5, 2, 1])
                     
                     with cols[0]:
-                        tk_disp = item.get('Name') or item['Ticker']
-                        st.markdown(f"**{item['Category']}** <span style='color:#888; font-size:0.9em;'>({item['Date']})</span><br><span style='color:#A8C7FA; font-weight:bold;'>{tk_disp}</span> ({item['Type']})", unsafe_allow_html=True)
+                        st.markdown(f"**{item['Category']}** <span style='color:#888; font-size:0.9em;'>({item['Date']})</span><br><span style='color:#A8C7FA; font-weight:bold;'>{item['Ticker']}</span> ({item['Type']})", unsafe_allow_html=True)
                     with cols[1]:
                         item['Qty'] = st.number_input("수량(Qty)", value=float(item['Qty']), key=f"qty_{i}")
                     with cols[2]:
@@ -590,29 +571,28 @@ def main():
                 next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
                 
                 for item in st.session_state['parsed_data']:
-                    n_val = str(item.get("Name", item["Ticker"]))
                     if item["Category"] == "USD_Trade":
-                        ws_usd_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), n_val, str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
+                        ws_usd_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
                         next_id += 1
                     elif item["Category"] == "USD_Dividend":
                         ws_usd_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
                         next_id += 1
                     elif item["Category"] == "USD_Exchange":
-                        ws_usd_money.append_row([ item["Date"], int(next_id), item["Type"], "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
+                        ws_usd_money.append_row([ item["Date"], int(next_id), "KRW_to_USD", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
                         next_id += 1
                     elif item["Category"] == "Japan_Trade":
-                        ws_jpy_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), n_val, str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
+                        ws_jpy_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), str(item["Ticker"]), str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
                         next_id += 1
                     elif item["Category"] == "Japan_Dividend":
                         ws_jpy_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
                         next_id += 1
                     elif item["Category"] == "Japan_Exchange":
-                        ws_jpy_money.append_row([ item["Date"], int(next_id), item["Type"], "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
+                        ws_jpy_money.append_row([ item["Date"], int(next_id), "KRW_to_JPY", "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
                         next_id += 1
                     elif item["Category"] == "Domestic_Trade":
-                        ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), n_val, int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"] if item.get("Price") else item["Amount"]), item["Memo"] ])
+                        ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), "-", int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"] if item.get("Price") else item["Amount"]), item["Memo"] ])
                     elif item["Category"] == "Domestic_Dividend":
-                        ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), n_val, 0, 0, float(item["Amount"]), item["Memo"] ])
+                        ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), "-", 0, 0, float(item["Amount"]), item["Memo"] ])
                     
                 st.success(f"✅ {len(st.session_state['parsed_data'])}건 DB 최종 저장 완료! 시세를 재동기화합니다.")
                 st.session_state['parsed_data'] = [] 
@@ -622,7 +602,7 @@ def main():
                 st.rerun()
 
     # -------------------------------------------------------------------
-    # [통합 상세 테이블: 종목명 분리 & 예수금 환손익 포함]
+    # [통합 상세 테이블: 예수금(현금) 행 추가]
     # -------------------------------------------------------------------
     with tab_detail:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
@@ -634,15 +614,8 @@ def main():
             data = portfolio[tk]; qty = data['qty']; cur_p = prices.get(tk, 0)
             if qty == 0 and data['realized_krw'] == 0 and data['accum_div_for'] == 0 and data['accum_div_krw'] == 0: continue
 
-            display_name = tk
-            if data['currency'] == 'JPY':
-                n = data.get('name', '')
-                base_tk = tk.replace('.T', '')
-                if n and n != tk and n != base_tk and n != '-': display_name = f"{n}({base_tk})"
-                else: display_name = base_tk
-
             if is_skeleton:
-                rows_html += f"<tr><td>{display_name}</td><td>-</td><td>-</td><td>-</td><td>{data['realized_krw'] + (data['accum_div_krw'] if data['currency']=='KRW' else 0):,.0f}</td><td>-</td><td style='color:#ccc;'>-</td></tr>"
+                rows_html += f"<tr><td>{tk}</td><td>-</td><td>-</td><td>-</td><td>{data['realized_krw'] + (data['accum_div_krw'] if data['currency']=='KRW' else 0):,.0f}</td><td>-</td><td style='color:#ccc;'>-</td></tr>"
                 continue
 
             if data['currency'] == 'KRW':
@@ -665,7 +638,7 @@ def main():
 
             sum_eval_krw += eval_krw; sum_realized += (data['realized_krw'] + div_krw)
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
-            rows_html += f"<tr><td>{display_name}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['currency']=='KRW' else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:#ccc;'>{margin_str}</td></tr>"
+            rows_html += f"<tr><td>{tk}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['currency']=='KRW' else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:#ccc;'>{margin_str}</td></tr>"
             
         # 외화 예수금 행 추가 (로딩 중이 아닐 때만)
         if not is_skeleton:
@@ -720,7 +693,8 @@ def main():
             else: 
                 p = kis.get_current_price(tk)
             
-            if p <= 0 and tk in old_prices and old_prices[tk] > 0: p = old_prices[tk]
+            if p <= 0 and tk in old_prices and old_prices[tk] > 0:
+                p = old_prices[tk]
             new_prices[tk] = p
         
         try:
