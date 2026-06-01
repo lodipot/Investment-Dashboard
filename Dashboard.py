@@ -116,7 +116,7 @@ def load_data():
     return df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic
 
 # -------------------------------------------------------------------
-# [4] 계산 엔진 (FX 실현손익 및 예수금 이동 통합)
+# [4] 계산 엔진 (1 JPY 기반 정밀 연산)
 # -------------------------------------------------------------------
 def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
     df_t = df_t_raw.copy()
@@ -163,14 +163,12 @@ def process_foreign_currency(df_t_raw, df_m_raw, curr_label):
             if 'dividend' in t_type or '배당' in t_type:
                 if ticker != 'Cash': port[ticker]['accum_div_for'] += for_amt
             elif 'to_krw' in t_type: 
-                # [핵심] 환전 매도 시: 매수 평단가로 계산된 순수 환차익 실현
                 if for_amt > 0:
                     fx_realized += krw_amt - (for_amt * avg_rate)
                     balance -= for_amt
-                    krw_sum -= krw_amt # 출금액만큼 원금 차감 (BEP 계산 보정)
-                    withdrawn_krw += krw_amt # 원화 예수금으로 이동시킬 금액
+                    krw_sum -= krw_amt 
+                    withdrawn_krw += krw_amt 
             else:
-                # [핵심] 환전 매수 시: 평단가 갱신
                 if balance <= 0:
                     if for_amt > 0: avg_rate = krw_amt / for_amt
                 else:
@@ -240,14 +238,13 @@ def process_timeline(df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_
         elif 'withdraw' in t_type or '출금' in t_type:
             dom_cash -= amount_krw; dom_principal_sum -= amount_krw
 
-    # [수정] 외화 매도 시 환수된 원화를 국내 예수금 및 총 원금에 자동 반영 (자산 증발 방지)
     dom_cash += (usd_wd + jpy_wd)
     dom_principal_sum += (usd_wd + jpy_wd)
 
     return usd_bal, usd_rate, usd_krw_sum, usd_fx_real, jpy_bal, jpy_rate, jpy_krw_sum, jpy_fx_real, dom_cash, dom_principal_sum, portfolio
 
 # -------------------------------------------------------------------
-# [5] 카톡 파서 (외화 매도/매수, 일본 주식 네이밍 & 당일 시간 픽스)
+# [5] 카톡 파서
 # -------------------------------------------------------------------
 def parse_kakaotalk_final(text, base_date):
     parsed_list = []
@@ -265,7 +262,6 @@ def parse_kakaotalk_final(text, base_date):
                 parsed_list.append({ "Category": "Domestic_Trade", "Date": t_dt.strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Name": t_name.strip(), "Type": "Buy" if t_dir == "매수" else "Sell", "Qty": int(t_qty.replace(',','')), "Price": float(t_prc.replace(',','')), "Amount": 0, "Memo": f"카톡파싱_{t_str}" })
                 continue
                 
-            # [버그 수정] 일본 거래는 어제 밤 23:30이 아닌 "당일 실제 시간"으로 기록 (타임머신 방지)
             jpy_tr_m = re.search(r'\[한국투자증권 체결안내\].*?(\d{2}:\d{2}).*?\*매매구분:(매수|매도).*?\*종목명:([A-Za-z0-9.]+)/(.*?)\s*\*체결수량:([\d,]+).*?\*체결단가:JPY\s*([\d.,]+)', chunk)
             if jpy_tr_m:
                 t_str, t_dir, t_code, t_name, t_qty, t_prc = jpy_tr_m.groups()
@@ -301,7 +297,6 @@ def parse_kakaotalk_final(text, base_date):
                 parsed_list.append({ "Category": "Domestic_Dividend", "Date": datetime(int(y), int(m), int(d), 15, 0, 0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": t_tkr, "Name": t_name.strip(), "Type": "Dividend", "Qty": 0, "Price": 0, "Amount": float(t_amt.replace(',', '')), "Memo": "카톡파싱_국내배당" })
                 continue
 
-            # [수정] 매수 환전 인식
             buy_ex_m = re.search(r'외화매수환전.*?￦([0-9,]+).*?@([0-9,.]+).*?(JPY|USD)\s*([0-9,.]+)', chunk)
             if buy_ex_m:
                 k_amt, ex_rt, currency, u_amt = buy_ex_m.groups()
@@ -310,7 +305,6 @@ def parse_kakaotalk_final(text, base_date):
                 parsed_list.append({ "Category": cat, "Date": datetime.combine(base_date, datetime.min.time()).replace(hour=14, minute=0).strftime("%Y-%m-%d %H:%M:%S"), "Ticker": "-", "Name": "", "Type": c_type, "Qty": 0, "Price": float(u_amt.replace(',', '')), "Amount": float(k_amt.replace(',', '')), "Memo": "카톡파싱_매수환전" })
                 continue
                 
-            # [수정] 매도 환전 인식 (수익 실현)
             sell_ex_m = re.search(r'외화매도환전.*?(JPY|USD)\s*([0-9,.]+).*?@([0-9,.]+).*?￦([0-9,]+)', chunk)
             if sell_ex_m:
                 currency, u_amt, ex_rt, k_amt = sell_ex_m.groups()
@@ -371,7 +365,7 @@ def main():
     jpy_bep = (jpy_bep_num / jpy_assets) if jpy_assets > 0 else 0.0
     jpy_margin = cur_jpy_rate - jpy_bep
 
-    # 환전 실현손익 UI 텍스트 준비
+    # [수정] HTML 줄바꿈(Enter)으로 인한 </div> 태그 노출 현상 완벽 차단
     usd_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{usd_fx_real:,.0f}원</span>" if usd_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {usd_fx_real:,.0f}원</span>" if usd_fx_real < 0 else "")
     jpy_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{jpy_fx_real:,.0f}원</span>" if jpy_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {jpy_fx_real:,.0f}원</span>" if jpy_fx_real < 0 else "")
 
@@ -380,6 +374,7 @@ def main():
         top_pl_str = "-"; top_usd_margin_str = "-"; top_usd_bep_str = "-"; top_jpy_margin_str = "-"; top_jpy_bep_str = "-"
         card_cls_main = "stock-card card-neutral"; usd_card_cls = "stock-card card-neutral"; jpy_card_cls = "stock-card card-neutral"
         txt_cls = "txt-sub"; usd_txt_cls = "txt-sub"; jpy_txt_cls = "txt-sub"
+        jpy_rate_disp = 0; jpy_bep_disp = 0
     else:
         top_asset_str = f"₩ {total_asset_krw:,.0f}"
         is_plus = total_pl_krw >= 0
@@ -387,16 +382,21 @@ def main():
         
         top_usd_margin_str = f"{'+' if usd_margin >= 0 else ''}{usd_margin:,.2f} 원" if usd_assets > 0 else "-"
         top_usd_bep_str = f"₩ {usd_bep:,.2f}" if usd_assets > 0 else "-"
-        top_jpy_margin_str = f"{'+' if jpy_margin >= 0 else ''}{jpy_margin:,.2f} 원" if jpy_assets > 0 else "-"
-        top_jpy_bep_str = f"₩ {jpy_bep:,.2f}" if jpy_assets > 0 else "-"
+        
+        # [수정] 엔화는 100엔 기준으로 UI 표기 스케일링
+        jpy_rate_disp = jpy_rate * 100
+        jpy_bep_disp = jpy_bep * 100
+        jpy_margin_disp = jpy_margin * 100
+        top_jpy_margin_str = f"{'+' if jpy_margin_disp >= 0 else ''}{jpy_margin_disp:,.2f} 원 (100엔)" if jpy_assets > 0 else "-"
+        top_jpy_bep_str = f"₩ {jpy_bep_disp:,.2f}" if jpy_assets > 0 else "-"
 
         card_cls_main = f"stock-card {'card-up' if is_plus else 'card-down'}"
         usd_card_cls = f"stock-card {'card-up' if usd_margin >= 0 else 'card-down'}" if usd_assets > 0 else "stock-card card-neutral"
-        jpy_card_cls = f"stock-card {'card-up' if jpy_margin >= 0 else 'card-down'}" if jpy_assets > 0 else "stock-card card-neutral"
+        jpy_card_cls = f"stock-card {'card-up' if jpy_margin_disp >= 0 else 'card-down'}" if jpy_assets > 0 else "stock-card card-neutral"
         
         txt_cls = "txt-red" if is_plus else "txt-blue"
         usd_txt_cls = "txt-red" if usd_margin >= 0 else "txt-blue"
-        jpy_txt_cls = "txt-red" if jpy_margin >= 0 else "txt-blue"
+        jpy_txt_cls = "txt-red" if jpy_margin_disp >= 0 else "txt-blue"
 
     c1, c2 = st.columns([3, 1])
     with c1: st.title("🚀 Investment Command Center")
@@ -422,8 +422,7 @@ def main():
             <div class="card-sub-box">
                 <span style="color:#888; font-weight:400;">매수평단 ₩ {usd_rate:,.2f}</span><br>
                 <span style="color:#888; font-weight:400;">BEP {top_usd_bep_str}</span><br>
-                <span class="{usd_txt_cls if usd_assets > 0 else 'txt-sub'}">마진 {top_usd_margin_str}</span>
-                {usd_fx_text if usd_fx_real != 0 else ''}
+                <span class="{usd_txt_cls if usd_assets > 0 else 'txt-sub'}">마진 {top_usd_margin_str}</span>{usd_fx_text}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -433,10 +432,9 @@ def main():
             <div class="card-header"><span class="card-ticker">엔화 잔고</span><span class="card-price">JPY Command</span></div>
             <div class="card-main-val">¥ {jpy_bal:,.0f}</div>
             <div class="card-sub-box">
-                <span style="color:#888; font-weight:400;">매수평단 ₩ {jpy_rate:,.2f}</span><br>
+                <span style="color:#888; font-weight:400;">매수평단 ₩ {jpy_rate_disp:,.2f} (100엔)</span><br>
                 <span style="color:#888; font-weight:400;">BEP {top_jpy_bep_str}</span><br>
-                <span class="{jpy_txt_cls if jpy_assets > 0 else 'txt-sub'}">마진 {top_jpy_margin_str}</span>
-                {jpy_fx_text if jpy_fx_real != 0 else ''}
+                <span class="{jpy_txt_cls if jpy_assets > 0 else 'txt-sub'}">마진 {top_jpy_margin_str}</span>{jpy_fx_text}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -457,7 +455,6 @@ def main():
             for idx, tk in enumerate(valid_tickers):
                 data = portfolio[tk]; qty = data['qty']; cur_p = prices.get(tk, 0)
                 
-                # [수정] 일본 종목명 표기법 자동 조합 (예: 닌텐도(7974))
                 display_name = tk
                 if data['currency'] == 'JPY':
                     n = data.get('name', '')
@@ -485,7 +482,7 @@ def main():
                         total_pl_tk = val_krw - invested_krw + data['realized_krw'] + div_krw
                         bep_rate_tk = (invested_krw - data['realized_krw'] - div_krw) / (qty * cur_p) if (qty*cur_p) > 0 else 0
                         margin_tk = fx - bep_rate_tk
-                        margin_tk_str = f"{margin_tk:+.1f} 원"
+                        margin_tk_str = f"{margin_tk*100:+.2f} 원 (100엔)" if data['currency'] == 'JPY' else f"{margin_tk:+.1f} 원"
                         price_display = f"${cur_p:.2f}" if data['currency'] == 'USD' else f"¥ {cur_p:,.0f}"
 
                     total_ret = (total_pl_tk / invested_krw * 100) if invested_krw > 0 else 0
@@ -513,10 +510,10 @@ def main():
                 cols[idx % 4].markdown(html, unsafe_allow_html=True)
 
     # -------------------------------------------------------------------
-    # [입력 매니저: 임시 카드 폼팩터 도입 (Human-in-the-Loop)]
+    # [입력 매니저: 임시 카드 UI (환전 입력창 분리 완벽 적용)]
     # -------------------------------------------------------------------
     with tab_input:
-        st.info("💡 카톡 메시지를 쏟아붓고 분석한 뒤, 임시 카드에서 오차(세금 등)를 수정하고 DB로 일괄 전송합니다.")
+        st.info("💡 카톡 메시지를 분석한 뒤, 임시 카드에서 오차(세금 등)를 수정하고 DB로 전송합니다.")
         c1, c2 = st.columns([1, 2])
         with c1: ref_date = st.date_input("기준 날짜 (카톡 수신일)", datetime.now())
         with c2: raw_text = st.text_area("카톡 내용 붙여넣기", height=120, placeholder="[한국투자증권 체결안내]08:05...")
@@ -556,12 +553,14 @@ def main():
                     with cols[1]:
                         item['Qty'] = st.number_input("수량(Qty)", value=float(item['Qty']), key=f"qty_{i}")
                     with cols[2]:
-                        curr_val = item['Price'] if item['Price'] > 0 else item['Amount']
-                        new_val = st.number_input("단가/원화총액", value=float(curr_val), key=f"val_{i}", step=0.01)
-                        if item['Category'] in ['Domestic_Dividend', 'USD_Exchange', 'Japan_Exchange']:
-                            item['Amount'] = new_val
+                        # [버그 수정 1] 환전 시 외화액과 원화액을 '독립된 입력창'으로 제공하여 덮어쓰기 원천 차단
+                        if 'Exchange' in item['Category']:
+                            item['Price'] = st.number_input("외화 획득/매도량", value=float(item['Price']), key=f"f_{i}")
+                            item['Amount'] = st.number_input("원화 투입/회수량", value=float(item['Amount']), key=f"k_{i}")
+                        elif 'Domestic_Dividend' == item['Category']:
+                            item['Amount'] = st.number_input("배당금(₩)", value=float(item['Amount']), key=f"k_{i}")
                         else:
-                            item['Price'] = new_val
+                            item['Price'] = st.number_input("단가/외화배당", value=float(item['Price']), key=f"p_{i}", step=0.01)
                     with cols[3]:
                         item['Memo'] = st.text_input("메모", value=item['Memo'], key=f"memo_{i}")
                     with cols[4]:
@@ -622,7 +621,7 @@ def main():
                 st.rerun()
 
     # -------------------------------------------------------------------
-    # [통합 상세 테이블: 종목명 분리 & 예수금 환손익 포함]
+    # [통합 상세 테이블]
     # -------------------------------------------------------------------
     with tab_detail:
         header = "<table class='int-table'><thead><tr><th>종목</th><th>평가액 (₩)</th><th>평가손익</th><th>환손익</th><th>실현+배당</th><th>총 손익 (Total)</th><th>안전마진</th></tr></thead><tbody>"
@@ -667,7 +666,6 @@ def main():
             cls_tot = "txt-red" if total_pl >= 0 else "txt-blue"
             rows_html += f"<tr><td>{display_name}</td><td>{eval_krw:,.0f}</td><td class='{'txt-red' if price_profit >=0 else 'txt-blue'}'>{price_profit:,.0f}</td><td class='{'txt-sub' if data['currency']=='KRW' else ('txt-red' if float(fx_profit_str.replace(',',''))>=0 else 'txt-blue') if fx_profit_str!='-' else 'txt-sub'}'>{fx_profit_str}</td><td>{data['realized_krw'] + div_krw:,.0f}</td><td class='{cls_tot} {'bg-red' if total_pl>=0 else 'bg-blue'}'><b>{total_pl:,.0f}</b></td><td style='color:#ccc;'>{margin_str}</td></tr>"
             
-        # 외화 예수금 행 추가 (로딩 중이 아닐 때만)
         if not is_skeleton:
             if usd_bal > 0:
                 usd_cash_eval = usd_bal * cur_usd_rate
