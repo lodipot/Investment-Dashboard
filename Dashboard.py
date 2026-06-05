@@ -7,7 +7,7 @@ import time
 import re
 import yfinance as yf
 import KIS_API_Manager as kis
-
+import Data_Ingestion as di  # ✨ 신규 입력 모듈
 # -------------------------------------------------------------------
 # [1] 설정 & 다크모드
 # -------------------------------------------------------------------
@@ -92,28 +92,91 @@ def safe_float(val):
     try: return float(str(val).replace(',', '').strip())
     except: return 0.0
 
-@st.cache_data
-def load_data():
-    client = get_gsheet_client()
-    sh = client.open("Investment_Dashboard_DB")
+@st.cache_resource
+def get_sheet_client():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return gspread.authorize(creds)
+
+def load_unified_ledger_as_adapters():
+    """
+    단일 Unified_Ledger를 불러와서, 기존 UI 로직이 깨지지 않도록
+    기존 탭(Money_Log, Trade_Log) 구조의 DataFrame으로 변환(Adapter)해줍니다.
+    """
+    client = get_sheet_client()
+    try:
+        ws = client.open("Investment_Dashboard_DB").worksheet("Unified_Ledger")
+        df = pd.DataFrame(ws.get_all_records())
+        if df.empty:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), client
+        
+        # Timestamp 기준 정렬
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        df = df.sort_values(by='Timestamp').reset_index(drop=True)
+        
+        # 1. USD Adapter
+        usd_df = df[df['Currency'] == 'USD'].copy()
+        usd_money_df = usd_df[usd_df['Event_Type'].isin(['환전', '배당'])].copy()
+        usd_money_df.rename(columns={'Timestamp': 'Date', 'Event_Type': 'Type', 'Total_Amount': 'USD_Amount', 'Price': 'Ex_Rate'}, inplace=True)
+        usd_money_df['Type'] = usd_money_df['Type'].replace({'환전': 'KRW_to_USD', '배당': 'Dividend'})
+        
+        usd_trade_df = usd_df[usd_df['Event_Type'].isin(['매수', '매도'])].copy()
+        usd_trade_df.rename(columns={'Timestamp': 'Date', 'Event_Type': 'Type', 'Asset_Name': 'Name', 'Quantity': 'Qty'}, inplace=True)
+        usd_trade_df['Type'] = usd_trade_df['Type'].replace({'매수': 'Buy', '매도': 'Sell'})
+
+        # 2. JPY Adapter
+        jpy_df = df[df['Currency'] == 'JPY'].copy()
+        jpy_money_df = jpy_df[jpy_df['Event_Type'].isin(['환전', '배당'])].copy()
+        jpy_money_df.rename(columns={'Timestamp': 'Date', 'Event_Type': 'Type', 'Total_Amount': 'JPY_Amount', 'Price': 'Ex_Rate'}, inplace=True)
+        jpy_money_df['Type'] = jpy_money_df['Type'].replace({'환전': 'KRW_to_JPY', '배당': 'Dividend'})
+        
+        jpy_trade_df = jpy_df[jpy_df['Event_Type'].isin(['매수', '매도'])].copy()
+        jpy_trade_df.rename(columns={'Timestamp': 'Date', 'Event_Type': 'Type', 'Asset_Name': 'Name', 'Quantity': 'Qty'}, inplace=True)
+        jpy_trade_df['Type'] = jpy_trade_df['Type'].replace({'매수': 'Buy', '매도': 'Sell'})
+
+        # 3. KRW (국내주식 및 입출금) Adapter
+        krw_df = df[df['Currency'] == 'KRW'].copy()
+        
+        return usd_money_df, usd_trade_df, jpy_money_df, jpy_trade_df, krw_df, client
+    except Exception as e:
+        st.error(f"DB 연결 오류: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), client
+
+# 기존 로직과 변수명이 100% 일치하도록 매핑 (이후 기존 UI 로직은 수정 불필요)
+usd_money_df, usd_trade_df, jpy_money_df, jpy_trade_df, krw_money_df, g_client = load_unified_ledger_as_adapters()
+
+# -------------------------------------------------------------------
+# [신규] 사이드바: 통합 입력 스테이션 (기존 UI를 방해하지 않음)
+# -------------------------------------------------------------------
+with st.sidebar:
+    st.subheader("📥 Data Entry")
     
-    def get_safe_df(sheet_name, default_columns):
-        try:
-            ws = sh.worksheet(sheet_name)
-            records = ws.get_all_records()
-            if not records: return pd.DataFrame(columns=default_columns)
-            df = pd.DataFrame(records)
-            df.columns = df.columns.astype(str).str.strip()
-            return df
-        except: return pd.DataFrame(columns=default_columns)
+    with st.expander("💬 카톡 파싱 및 적재", expanded=True):
+        kakao_text = st.text_area("카카오톡 알림 내용", height=150)
+        if st.button("원장에 임시(Pending) 추가"):
+            if kakao_text:
+                events = di.parse_kakao_alert(kakao_text)
+                di.insert_events_to_sheet(g_client, events)
+                st.success(f"{len(events)}건 적재 완료!")
+                st.rerun()
 
-    df_usd_trade = get_safe_df("USD_Trade_Log", ['Date', 'Order_ID', 'Ticker', 'Name', 'Type', 'Qty', 'Price_USD', 'Ex_Avg_Rate', 'Note'])
-    df_usd_money = get_safe_df("USD_Money_Log", ['Date', 'Order_ID', 'Type', 'Ticker', 'KRW-USD_Amount', 'USD_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance', 'Note'])
-    df_jpy_trade = get_safe_df("JPY_Trade_Log", ['Date', 'Order_ID', 'Ticker', 'Name', 'Type', 'Qty', 'Price_JPY', 'Ex_Avg_Rate', 'Note'])
-    df_jpy_money = get_safe_df("JPY_Money_Log", ['Date', 'Order_ID', 'Type', 'Ticker', 'KRW-JPY_Amount', 'JPY_Amount', 'Ex_Rate', 'Avg_Rate', 'Balance', 'Note'])
-    df_domestic = get_safe_df("Domestic_Log", ['Date', 'Type', 'Ticker', 'Name', 'Qty', 'Price_KRW', 'Amount_KRW', 'Note'])
+    with st.expander("💰 단순 원화 입출금"):
+        krw_amt = st.number_input("금액 (원)", step=10000)
+        io_type = st.radio("구분", ["입금", "출금"], horizontal=True)
+        krw_note = st.text_input("출처/메모")
+        if st.button("KRW 수동 기록"):
+            if krw_amt > 0:
+                di.manual_krw_entry(g_client, datetime.now(), io_type, krw_amt, krw_note)
+                st.success("기록 완료!")
+                st.rerun()
 
-    return df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic
+    st.divider()
+    if st.button("🔄 API 체결내역 동기화 (Upsert)", type="primary"):
+        kis.sync_api_to_ledger(g_client, usd_trade_df) # 추후 구현된 모듈 작동
+        st.success("API 대조 완료")
+        st.rerun()
+
 
 # -------------------------------------------------------------------
 # [4] 계산 엔진 (1 JPY 기반 정밀 연산)
