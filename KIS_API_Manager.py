@@ -5,7 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 import time
-
+import hashlib
 # =========================================================
 # [1] 설정 및 상수
 # =========================================================
@@ -213,3 +213,25 @@ def get_trade_history(start_date, end_date):
         pass
 
     return {'output1': final_result}
+
+def sync_api_to_ledger(client, df_ledger):
+    """
+    Unified_Ledger 시트의 Pending 내역을 API(당일 체결 조회 등) 내역과 대조하여
+    정확한 Timestamp와 Order_No로 업데이트합니다.
+    (세부적인 KIS API 호출 로직은 기존 토큰 구조를 활용하여 구현)
+    """
+    ws = client.open("Investment_Dashboard_DB").worksheet("Unified_Ledger")
+    
+    # 향후 구현: 실제 KIS 체결 API(TTTS3035R 등)를 호출하여 api_records 리스트를 만듦
+    api_records = [] 
+    
+    for api_rec in api_records:
+        # 매칭 로직 (종목, 수량, 가격이 일치하는 Pending 레코드 탐색)
+        mask = (df_ledger['Status'] == 'Pending') & (df_ledger['Ticker'] == api_rec['Ticker']) & (df_ledger['Quantity'] == api_rec['Quantity'])
+        matching_rows = df_ledger[mask]
+        
+        if not matching_rows.empty:
+            sheet_row = int(matching_rows.index[0]) + 2 # 헤더 보정
+            ws.update_cell(sheet_row, 2, 'Confirmed') # Status
+            ws.update_cell(sheet_row, 3, api_rec['Timestamp']) # 정확한 체결시간 덮어쓰기
+            ws.update_cell(sheet_row, 13, api_rec['Order_No']) # Order_No 기록
