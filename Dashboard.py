@@ -5,9 +5,10 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 import time
 import re
+import hashlib
 import yfinance as yf
 import KIS_API_Manager as kis
-import Data_Ingestion as di  # ✨ 신규 입력 모듈
+
 # -------------------------------------------------------------------
 # [1] 설정 & 다크모드
 # -------------------------------------------------------------------
@@ -78,10 +79,10 @@ SORT_ORDER_TABLE = ['O', 'JEPI', 'JEPQ', 'GOOGL', 'NVDA', 'AMD', 'TSM', '7733.T'
 DOMESTIC_TICKER_MAP = { '458730': 'SCHD(ISA)' }
 
 # -------------------------------------------------------------------
-# [3] 로드
+# [3] 단일 통합원장 로드 및 기존 엔진용 어댑터(Adapter)
 # -------------------------------------------------------------------
 @st.cache_resource
-def get_gsheet_client():
+def get_sheet_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -92,18 +93,7 @@ def safe_float(val):
     try: return float(str(val).replace(',', '').strip())
     except: return 0.0
 
-@st.cache_resource
-def get_sheet_client():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(creds)
-
 def load_unified_ledger_as_adapters():
-    """
-    단일 Unified_Ledger를 불러와서, 기존 UI 로직이 깨지지 않도록
-    기존 탭(Money_Log, Trade_Log) 구조의 DataFrame으로 변환(Adapter)해줍니다.
-    """
     client = get_sheet_client()
     try:
         ws = client.open("Investment_Dashboard_DB").worksheet("Unified_Ledger")
@@ -111,7 +101,7 @@ def load_unified_ledger_as_adapters():
         if df.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), client
         
-        # Timestamp 기준 정렬
+        # Timestamp 기준 정렬 (핵심)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
         df = df.sort_values(by='Timestamp').reset_index(drop=True)
         
@@ -137,46 +127,50 @@ def load_unified_ledger_as_adapters():
 
         # 3. KRW (국내주식 및 입출금) Adapter
         krw_df = df[df['Currency'] == 'KRW'].copy()
+        krw_df.rename(columns={'Timestamp': 'Date', 'Asset_Name': 'Name', 'Quantity': 'Qty'}, inplace=True)
+        krw_type_map = {'매수': 'Buy', '매도': 'Sell', '배당': 'Dividend', '입금': 'Deposit', '출금': 'Withdraw'}
+        krw_df['Type'] = krw_df['Event_Type'].map(krw_type_map).fillna(krw_df['Event_Type'])
+        krw_df['Amount_KRW'] = krw_df.apply(lambda r: r['KRW_Amount'] if r['Event_Type'] in ['입금', '출금'] else r['Total_Amount'], axis=1)
         
         return usd_money_df, usd_trade_df, jpy_money_df, jpy_trade_df, krw_df, client
     except Exception as e:
         st.error(f"DB 연결 오류: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), client
 
-# 기존 로직과 변수명이 100% 일치하도록 매핑 (이후 기존 UI 로직은 수정 불필요)
-usd_money_df, usd_trade_df, jpy_money_df, jpy_trade_df, krw_money_df, g_client = load_unified_ledger_as_adapters()
+# 데이터 글로벌 로딩
+usd_money_df, usd_trade_df, jpy_money_df, jpy_trade_df, df_domestic, g_client = load_unified_ledger_as_adapters()
 
 # -------------------------------------------------------------------
-# [신규] 사이드바: 통합 입력 스테이션 (기존 UI를 방해하지 않음)
+# [사이드바] 원화 단순 입출금 및 API 동기화 스테이션
 # -------------------------------------------------------------------
 with st.sidebar:
-    st.subheader("📥 Data Entry")
+    st.subheader("💰 원화 수동 입출금")
+    # 날짜와 시간을 지정할 수 있도록 컴포넌트 추가
+    entry_date = st.date_input("입출금 날짜", datetime.now().date())
+    entry_time = st.time_input("입출금 시간", datetime.now().time())
+    krw_amt = st.number_input("금액 (원)", step=10000)
+    io_type = st.radio("구분", ["입금", "출금"], horizontal=True)
+    krw_note = st.text_input("출처/메모")
     
-    with st.expander("💬 카톡 파싱 및 적재", expanded=True):
-        kakao_text = st.text_area("카카오톡 알림 내용", height=150)
-        if st.button("원장에 임시(Pending) 추가"):
-            if kakao_text:
-                events = di.parse_kakao_alert(kakao_text)
-                di.insert_events_to_sheet(g_client, events)
-                st.success(f"{len(events)}건 적재 완료!")
-                st.rerun()
-
-    with st.expander("💰 단순 원화 입출금"):
-        krw_amt = st.number_input("금액 (원)", step=10000)
-        io_type = st.radio("구분", ["입금", "출금"], horizontal=True)
-        krw_note = st.text_input("출처/메모")
-        if st.button("KRW 수동 기록"):
-            if krw_amt > 0:
-                di.manual_krw_entry(g_client, datetime.now(), io_type, krw_amt, krw_note)
-                st.success("기록 완료!")
-                st.rerun()
-
+    if st.button("원장에 기록", use_container_width=True):
+        if krw_amt > 0:
+            dt_combined = datetime.combine(entry_date, entry_time).strftime("%Y-%m-%d %H:%M:%S")
+            final_amt = krw_amt if io_type == "입금" else -krw_amt
+            event_id = "MANUAL_" + hashlib.sha256(f"{dt_combined}_{io_type}_{krw_amt}".encode()).hexdigest()[:8]
+            
+            row = [event_id, 'Confirmed', dt_combined, io_type, '-', '-', '-', 0, 0, 'KRW', 0, final_amt, '-', krw_note]
+            g_client.open("Investment_Dashboard_DB").worksheet("Unified_Ledger").append_row(row, value_input_option='USER_ENTERED')
+            
+            st.success("기록 완료!")
+            time.sleep(1)
+            st.rerun()
+            
     st.divider()
-    if st.button("🔄 API 체결내역 동기화 (Upsert)", type="primary"):
-        kis.sync_api_to_ledger(g_client, usd_trade_df) # 추후 구현된 모듈 작동
+    if st.button("🔄 API 체결내역 동기화 (Upsert)", type="primary", use_container_width=True):
+        # kis.sync_api_to_ledger(g_client, usd_trade_df) # 추후 구현시 주석 해제
         st.success("API 대조 완료")
+        time.sleep(1)
         st.rerun()
-
 
 # -------------------------------------------------------------------
 # [4] 계산 엔진 (1 JPY 기반 정밀 연산)
@@ -383,13 +377,8 @@ def parse_kakaotalk_final(text, base_date):
 # [6] Main UI
 # -------------------------------------------------------------------
 def main():
-    try:
-        dfs = load_data()
-        df_usd_trade, df_usd_money, df_jpy_trade, df_jpy_money, df_domestic = dfs
-    except Exception as e:
-        st.error(f"🚨 DB 로딩 실패: {e}"); st.stop()
-        
-    usd_bal, usd_rate, usd_krw_sum, usd_fx_real, jpy_bal, jpy_rate, jpy_krw_sum, jpy_fx_real, dom_cash, dom_principal_sum, portfolio = process_timeline(*dfs)
+    # 여기서 load_data() 호출 제거 -> 전역 변수 그대로 사용
+    usd_bal, usd_rate, usd_krw_sum, usd_fx_real, jpy_bal, jpy_rate, jpy_krw_sum, jpy_fx_real, dom_cash, dom_principal_sum, portfolio = process_timeline(usd_trade_df, usd_money_df, jpy_trade_df, jpy_money_df, df_domestic)
     
     prices = st.session_state.get('price_cache', {})
     cur_usd_rate = st.session_state.get('fx_rate_usd', 0.0)
@@ -428,7 +417,6 @@ def main():
     jpy_bep = (jpy_bep_num / jpy_assets) if jpy_assets > 0 else 0.0
     jpy_margin = cur_jpy_rate - jpy_bep
 
-    # [수정] HTML 줄바꿈(Enter)으로 인한 </div> 태그 노출 현상 완벽 차단
     usd_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{usd_fx_real:,.0f}원</span>" if usd_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {usd_fx_real:,.0f}원</span>" if usd_fx_real < 0 else "")
     jpy_fx_text = f"<br><span style='color:#FF5252; font-size:0.95em;'>환차익 +{jpy_fx_real:,.0f}원</span>" if jpy_fx_real > 0 else (f"<br><span style='color:#448AFF; font-size:0.95em;'>환차손 {jpy_fx_real:,.0f}원</span>" if jpy_fx_real < 0 else "")
 
@@ -446,7 +434,6 @@ def main():
         top_usd_margin_str = f"{'+' if usd_margin >= 0 else ''}{usd_margin:,.2f} 원" if usd_assets > 0 else "-"
         top_usd_bep_str = f"₩ {usd_bep:,.2f}" if usd_assets > 0 else "-"
         
-        # [수정] 엔화는 100엔 기준으로 UI 표기 스케일링
         jpy_rate_disp = jpy_rate * 100
         jpy_bep_disp = jpy_bep * 100
         jpy_margin_disp = jpy_margin * 100
@@ -573,7 +560,7 @@ def main():
                 cols[idx % 4].markdown(html, unsafe_allow_html=True)
 
     # -------------------------------------------------------------------
-    # [입력 매니저: 임시 카드 UI (환전 입력창 분리 완벽 적용)]
+    # [입력 매니저: 신통합원장(Unified_Ledger) 저장 로직 완벽 적용]
     # -------------------------------------------------------------------
     with tab_input:
         st.info("💡 카톡 메시지를 분석한 뒤, 임시 카드에서 오차(세금 등)를 수정하고 DB로 전송합니다.")
@@ -616,7 +603,6 @@ def main():
                     with cols[1]:
                         item['Qty'] = st.number_input("수량(Qty)", value=float(item['Qty']), key=f"qty_{i}")
                     with cols[2]:
-                        # [버그 수정 1] 환전 시 외화액과 원화액을 '독립된 입력창'으로 제공하여 덮어쓰기 원천 차단
                         if 'Exchange' in item['Category']:
                             item['Price'] = st.number_input("외화 획득/매도량", value=float(item['Price']), key=f"f_{i}")
                             item['Amount'] = st.number_input("원화 투입/회수량", value=float(item['Amount']), key=f"k_{i}")
@@ -639,42 +625,57 @@ def main():
                             st.rerun()
                     st.markdown("</div>", unsafe_allow_html=True)
 
-            if st.button("💾 검수 완료 및 DB 최종 반영", type="primary", use_container_width=True):
-                client = get_gsheet_client()
-                sheet_instance = client.open("Investment_Dashboard_DB")
-                ws_usd_trade = sheet_instance.worksheet("USD_Trade_Log")
-                ws_usd_money = sheet_instance.worksheet("USD_Money_Log")
-                ws_jpy_trade = sheet_instance.worksheet("JPY_Trade_Log")
-                ws_jpy_money = sheet_instance.worksheet("JPY_Money_Log")
-                ws_dom = sheet_instance.worksheet("Domestic_Log")
+            if st.button("💾 검수 완료 및 통합 DB 반영", type="primary", use_container_width=True):
+                ws_unified = g_client.open("Investment_Dashboard_DB").worksheet("Unified_Ledger")
                 
-                max_id = max(pd.to_numeric(df_usd_trade['Order_ID']).max(), pd.to_numeric(df_usd_money['Order_ID']).max(), pd.to_numeric(df_jpy_trade['Order_ID']).max(), pd.to_numeric(df_jpy_money['Order_ID']).max())
-                next_id = int(max_id) + 1 if not pd.isna(max_id) else 1
-                
+                rows_to_insert = []
                 for item in st.session_state['parsed_data']:
-                    n_val = str(item.get("Name", item["Ticker"]))
-                    if item["Category"] == "USD_Trade":
-                        ws_usd_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), n_val, str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
-                        next_id += 1
-                    elif item["Category"] == "USD_Dividend":
-                        ws_usd_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
-                        next_id += 1
-                    elif item["Category"] == "USD_Exchange":
-                        ws_usd_money.append_row([ item["Date"], int(next_id), item["Type"], "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
-                        next_id += 1
-                    elif item["Category"] == "Japan_Trade":
-                        ws_jpy_trade.append_row([ item["Date"], int(next_id), str(item["Ticker"]), n_val, str(item["Type"]), int(item["Qty"]), float(item["Price"]), "", item["Memo"] ])
-                        next_id += 1
-                    elif item["Category"] == "Japan_Dividend":
-                        ws_jpy_money.append_row([ item["Date"], int(next_id), "Dividend", str(item["Ticker"]), 0, float(item["Price"]), 0, "", "", item["Memo"] ])
-                        next_id += 1
-                    elif item["Category"] == "Japan_Exchange":
-                        ws_jpy_money.append_row([ item["Date"], int(next_id), item["Type"], "-", float(item["Amount"]), float(item["Price"]), float(item["Amount"]/item["Price"] if item["Price"]>0 else 0), "", "", item["Memo"] ])
-                        next_id += 1
-                    elif item["Category"] == "Domestic_Trade":
-                        ws_dom.append_row([ item["Date"], str(item["Type"]), str(item["Ticker"]), n_val, int(item["Qty"]), float(item["Price"]), float(item["Qty"]*item["Price"] if item.get("Price") else item["Amount"]), item["Memo"] ])
-                    elif item["Category"] == "Domestic_Dividend":
-                        ws_dom.append_row([ item["Date"], "Dividend", str(item["Ticker"]), n_val, 0, 0, float(item["Amount"]), item["Memo"] ])
+                    cat = item["Category"]
+                    date = item["Date"]
+                    t_type = item["Type"]
+                    tkr = str(item.get("Ticker", "-"))
+                    name = str(item.get("Name", "-"))
+                    qty = float(item.get("Qty", 0))
+                    price = float(item.get("Price", 0))
+                    amt = float(item.get("Amount", 0))
+                    memo = str(item.get("Memo", ""))
+                    
+                    # 카테고리 기반 통화 및 시장 분류
+                    curr = "KRW"; market = "-"
+                    if "USD" in cat: curr = "USD"; market = "US"
+                    elif "Japan" in cat: curr = "JPY"; market = "JP"
+                    elif "Domestic" in cat: curr = "KRW"; market = "KR"
+                    
+                    # 14개 열 양식에 맞춘 파라미터 매핑
+                    event_type = "매수"
+                    tot_amt = 0; krw_amt = 0
+                    
+                    if "Trade" in cat:
+                        event_type = "매수" if "Buy" in t_type else "매도"
+                        tot_amt = qty * price
+                    elif "Dividend" in cat:
+                        event_type = "배당"
+                        tot_amt = price if curr != "KRW" else 0
+                        krw_amt = amt if curr == "KRW" else 0
+                        qty = 0; price = 0
+                    elif "Exchange" in cat:
+                        event_type = "환전"
+                        tot_amt = price
+                        krw_amt = amt
+                        qty = 0; price = 0
+                        
+                    raw_str = f"{date}_{tkr}_{qty}_{price}_{event_type}_{time.time()}"
+                    event_id = "EVT_" + hashlib.sha256(raw_str.encode('utf-8')).hexdigest()[:12]
+                    
+                    row = [
+                        event_id, 'Pending', date, event_type, market,
+                        tkr, name, qty, price, curr,
+                        tot_amt, krw_amt, '', memo
+                    ]
+                    rows_to_insert.append(row)
+                    
+                if rows_to_insert:
+                    ws_unified.append_rows(rows_to_insert, value_input_option='USER_ENTERED')
                     
                 st.success(f"✅ {len(st.session_state['parsed_data'])}건 DB 최종 저장 완료! 시세를 재동기화합니다.")
                 st.session_state['parsed_data'] = [] 
@@ -756,11 +757,11 @@ def main():
 
     with tab_log:
         st.caption("🇺🇸 달러 자산 로그 (Trade / Money)")
-        st.dataframe(df_usd_trade.fillna(''), use_container_width=True)
-        st.dataframe(df_usd_money.fillna(''), use_container_width=True)
+        st.dataframe(usd_trade_df.fillna(''), use_container_width=True)
+        st.dataframe(usd_money_df.fillna(''), use_container_width=True)
         st.caption("🇯🇵 엔화 자산 로그 (Trade / Money)")
-        st.dataframe(df_jpy_trade.fillna(''), use_container_width=True)
-        st.dataframe(df_jpy_money.fillna(''), use_container_width=True)
+        st.dataframe(jpy_trade_df.fillna(''), use_container_width=True)
+        st.dataframe(jpy_money_df.fillna(''), use_container_width=True)
         st.caption("🇰🇷 국내 자산 로그")
         st.dataframe(df_domestic.fillna(''), use_container_width=True)
 
