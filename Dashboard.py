@@ -172,10 +172,11 @@ def parse_kakao_money_events(text):
             h_int = 0
         return f"{y}-{m.zfill(2)}-{d.zfill(2)} {str(h_int).zfill(2)}:{mnt.zfill(2)}:00"
 
-    # 1. 환전 내역 정규식 (시간 추출 추가)
+    # 1. 외화 환전 (매수/매도) 추출 정규식
+    # 변경점: 반드시 ', 한국투자증권 :' 이 포함된 개별 메시지 헤더만 인식하도록 강제
     fx_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}).*?\n"
-        r"(?:.*?\n){1,5}?"
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
+        r"(?:.*?\n){0,4}?" # 헤더 이후 최대 4줄 이내에서만 검색 (다른 메시지로 넘어가는 것 방지)
         r"외화(?P<fx_type>매수|매도)환전\s*\n"
         r"(?P<sym1>￦|[A-Z]{3})\s*(?P<val1>[\d,.]+)\s*\n"
         r"@(?P<rate>[\d,.]+)\s*\n"
@@ -196,11 +197,13 @@ def parse_kakao_money_events(text):
             'Amount_Local': local_amt, 'Amount_KRW': krw_amt, 'Note': ''
         })
 
-    # 2. 해외 배당금 정규식 (시간 추출 추가)
+    # 2. 해외주식 배당금 추출 정규식
     div_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}).*?\n"
-        r"(?:.*?\n)?.*?\d{2}/\d{2}\s*\n"
-        r"(?P<ticker>[A-Z0-9]+)[^\n]*\n(?P<curr>[A-Z]{3})\s*(?P<amt>[\d,.]+)\s*\n세전배당입금"
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
+        r"(?:.*?\n){0,3}?"
+        r"(?P<ticker>[A-Z0-9]+)[^\n]*\n"
+        r"(?P<curr>[A-Z]{3})\s*(?P<amt>[\d,.]+)\s*\n"
+        r"세전배당입금"
     )
     for match in div_pattern.finditer(text):
         dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), 
@@ -214,11 +217,13 @@ def parse_kakao_money_events(text):
             'Amount_KRW': 0.0, 'Note': ''
         })
 
-    # 3. 국내 ETF 분배금 정규식 (시간 추출 추가)
+    # 3. 국내 ETF 결산분배금 추출 정규식
     etf_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}).*?\n"
-        r"(?:.*?\n)*?"
-        r"ETF 결산분배금 입금 안내\s*\n\*\s*종목명\s*:\s*(?P<name>[^\n]+)\s*\n(?:.*?\n)*?"
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
+        r"(?:.*?\n){0,4}?"
+        r"ETF 결산분배금 입금 안내\s*\n"
+        r"\*\s*종목명\s*:\s*(?P<name>[^\n]+)\s*\n"
+        r"(?:.*?\n){0,2}?"
         r"\*\s*입금액\s*:\s*(?P<amt>[\d,]+)원"
     )
     for match in etf_pattern.finditer(text):
@@ -234,6 +239,7 @@ def parse_kakao_money_events(text):
         })
 
     return events
+
 
 
 def sync_api_data():
