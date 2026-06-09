@@ -29,11 +29,14 @@ st.markdown(f"""
     .stException {{ display: none; }}
     .item-card {{ background:{THEME_CARD}; padding:15px; border-radius:8px; height: 165px; margin-bottom: 15px; }}
     .cube-card {{ background:{THEME_CARD}; padding:20px; border-radius:10px; border:1px solid {THEME_BORDER}; text-align:center; }}
+    /* 탭 디자인 커스텀 (옵션) */
+    .stTabs [data-baseweb="tab-list"] {{ gap: 24px; }}
+    .stTabs [data-baseweb="tab"] {{ height: 50px; white-space: pre-wrap; background-color: transparent; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }}
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 데이터베이스 I/O 및 코어 엔진
+# 1. 데이터베이스 I/O 및 코어 엔진 (변경 없음)
 # ==========================================
 def load_ledger():
     try:
@@ -47,7 +50,6 @@ def load_ledger():
 
 def save_ledger(df):
     df.to_csv(LEDGER_PATH, index=False)
-    # 저장 시 세션 스테이트 동기화
     st.session_state.processed_ledger = calculate_reservoir_engine(df)
 
 def generate_trade_hash(row):
@@ -80,26 +82,24 @@ def calculate_reservoir_engine(df):
         attached_rate = 0.0
         current_avg_rate = avg_fx_rate.get(curr, 0.0)
 
-        # [제1원칙] 물 채우기
         if cat == 'Money':
             if type_ == 'Deposit' and curr == 'KRW': cash_pool['KRW'] += amt_krw
             elif type_ == 'Withdraw' and curr == 'KRW': cash_pool['KRW'] -= amt_krw
             elif type_ == 'FX':
-                if amt_local > 0: # KRW Out, FX In
+                if amt_local > 0: 
                     cash_pool['KRW'] -= amt_krw
                     cash_pool[curr] += amt_local
                     invested_krw_pool[curr] += amt_krw
-                else: # FX Out, KRW In
+                else: 
                     cash_pool['KRW'] += amt_krw
                     cash_pool[curr] += amt_local 
                     invested_krw_pool[curr] += amt_local * current_avg_rate
                 if cash_pool[curr] > 0: avg_fx_rate[curr] = invested_krw_pool[curr] / cash_pool[curr]
             
-            elif type_ == 'Dividend': # 배당 희석 로직
+            elif type_ == 'Dividend': 
                 cash_pool[curr] += amt_local
                 if cash_pool[curr] > 0: avg_fx_rate[curr] = invested_krw_pool[curr] / cash_pool[curr]
 
-        # [제2, 3원칙] 매매와 꼬리표 환율
         elif cat == 'Trade':
             if type_ == 'Buy':
                 cash_pool[curr] -= amt_local
@@ -124,7 +124,7 @@ def calculate_reservoir_engine(df):
     return df_calc
 
 # ==========================================
-# 2. 파싱 및 API 동기화 엔진
+# 2. 파싱 및 API 동기화 엔진 (변경 없음)
 # ==========================================
 def parse_kakao_money_events(text):
     events = []
@@ -257,14 +257,6 @@ def build_portfolio(df):
     return active_portfolio
 
 def render_dashboard_ui():
-    col_title, col_btn = st.columns([8, 2])
-    with col_title: st.title("🌊 Global Multi-Currency Reservoir")
-    with col_btn:
-        st.write("")
-        if st.button("🔄 최신 내역 동기화", use_container_width=True):
-            sync_api_data()
-            st.rerun()
-
     df = st.session_state.get('processed_ledger', pd.DataFrame())
     if df.empty:
         st.info("데이터가 없습니다. API 동기화 또는 입력 매니저를 통해 원장을 구성해주세요.")
@@ -273,11 +265,9 @@ def render_dashboard_ui():
     latest = df.iloc[-1]
     portfolio = build_portfolio(df)
     
-    # 임시 실시간 시세 (추후 yfinance 및 KIS 시세 로직 연결)
     current_prices = {tk: data['Avg_Price'] * 1.05 for tk, data in portfolio.items()} 
-    live_fx = {'USD': 1380.0, 'JPY': 9.0, 'HKD': 175.0, 'KRW': 1.0} # JPY는 100엔 기준이 아닌 1엔 기준으로 세팅
+    live_fx = {'USD': 1380.0, 'JPY': 9.0, 'HKD': 175.0, 'KRW': 1.0}
 
-    # --- [Top] 통합 큐브 ---
     st.markdown("### 🌐 Global Assets Overview")
     cube_cols = st.columns(len(TARGET_CURRENCIES) + 1)
     
@@ -301,13 +291,11 @@ def render_dashboard_ui():
             </div>""", unsafe_allow_html=True)
     st.divider()
 
-    # --- [Sections] 시장별 카드 ---
     for curr in TARGET_CURRENCIES:
         st.markdown(f"### {curr} Market")
         curr_stocks = {tk: data for tk, data in portfolio.items() if data['Currency'] == curr}
         cols = st.columns(4)
         
-        # 1. Cash 카드
         pool_rate = df[df['Currency'] == curr].iloc[-1]['Current_Pool_Rate'] if not df[df['Currency'] == curr].empty else 0.0
         with cols[0]:
             st.markdown(f"""<div class="item-card" style="border-left:5px solid #FFCA28;">
@@ -318,7 +306,6 @@ def render_dashboard_ui():
                 </div>
             </div>""", unsafe_allow_html=True)
 
-        # 2. Stock 카드
         col_idx = 1
         for tk, data in curr_stocks.items():
             if col_idx > 3:
@@ -350,16 +337,20 @@ def render_dashboard_ui():
             col_idx += 1
         st.write("")
 
+# ==========================================
+# 4. 입력 매니저 (텍스트 시간 입력으로 개선)
+# ==========================================
 def render_input_manager():
-    st.markdown("### 📥 자본 흐름 입력 매니저")
+    st.info("💡 카카오톡 복사 내역 파싱 및 순수 원화 입출금을 기록합니다.")
     tab_manual, tab_kakao = st.tabs(["✍️ 순수 KRW 입출금", "💬 카카오톡 파싱 (배당/환전)"])
     
     with tab_manual:
         with st.form("manual_krw_form"):
             col1, col2, col3 = st.columns([1.5, 1, 1.5])
             with col1:
-                input_date = st.date_input("날짜", datetime.today())
-                input_time = st.time_input("시간", datetime.now().time())
+                # 15분 단위 픽서 제거 -> 텍스트 타이핑 폼으로 변경
+                input_date = st.date_input("날짜 (YYYY-MM-DD)", datetime.today())
+                input_time_str = st.text_input("시간 (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"))
             with col2:
                 inout_type = st.radio("구분", ["Deposit (입금)", "Withdraw (출금)"])
             with col3:
@@ -367,15 +358,22 @@ def render_input_manager():
                 note = st.text_input("메모")
                 
             if st.form_submit_button("원장 추가") and krw_amount > 0:
-                new_row = {
-                    'Date': f"{input_date} {input_time.strftime('%H:%M:%S')}", 'Category': 'Money',
-                    'Type': "Deposit" if "Deposit" in inout_type else "Withdraw",
-                    'Ticker': '', 'Name': note, 'Qty': 0.0, 'Price': 0.0,
-                    'Amount_Local': float(krw_amount), 'Amount_KRW': float(krw_amount),
-                    'Currency': 'KRW', 'Source': 'Manual_UI', 'PK_Hash': ''
-                }
-                save_ledger(sort_ledger_events(pd.concat([load_ledger(), pd.DataFrame([new_row])], ignore_index=True)))
-                st.success("✅ 원장에 추가되었습니다.")
+                # 텍스트로 입력된 시간이 올바른 형식인지 검증
+                try:
+                    valid_time = datetime.strptime(input_time_str, "%H:%M:%S").time()
+                    dt_str = f"{input_date} {valid_time.strftime('%H:%M:%S')}"
+                    
+                    new_row = {
+                        'Date': dt_str, 'Category': 'Money',
+                        'Type': "Deposit" if "Deposit" in inout_type else "Withdraw",
+                        'Ticker': '', 'Name': note, 'Qty': 0.0, 'Price': 0.0,
+                        'Amount_Local': float(krw_amount), 'Amount_KRW': float(krw_amount),
+                        'Currency': 'KRW', 'Source': 'Manual_UI', 'PK_Hash': ''
+                    }
+                    save_ledger(sort_ledger_events(pd.concat([load_ledger(), pd.DataFrame([new_row])], ignore_index=True)))
+                    st.success(f"✅ {dt_str} 원장 추가 완료!")
+                except ValueError:
+                    st.error("시간 형식이 잘못되었습니다. (예: 14:30:00)")
 
     with tab_kakao:
         kakao_text = st.text_area("카톡 텍스트 입력", height=150)
@@ -398,7 +396,7 @@ def render_input_manager():
                 st.rerun()
 
 # ==========================================
-# 4. 앱 메인 루프 (사이드바 네비게이션)
+# 5. 앱 메인 루프 (사이드바 완전 폐기 & 탭 네비게이션)
 # ==========================================
 def main():
     # 1회 자동 초기화
@@ -406,14 +404,25 @@ def main():
         st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
         st.session_state.initialized = True
         
-    st.sidebar.title("🏦 Menu")
-    app_mode = st.sidebar.radio("이동", ["📊 대시보드 뷰어", "📥 원장 관리 (입력)"])
-    st.sidebar.divider()
-    st.sidebar.info("**작동 안내**\n- API로 매매 내역을 동기화합니다.\n- 환전/배당은 '원장 관리'에서 카톡 파싱으로 넣으세요.")
+    # 최상단 글로벌 헤더 (타이틀 & 동기화 버튼)
+    col_title, col_btn = st.columns([8, 2])
+    with col_title: 
+        st.title("🌊 Global Multi-Currency Reservoir")
+    with col_btn:
+        st.write("")
+        if st.button("🔄 최신 매매내역 동기화", use_container_width=True):
+            sync_api_data()
+            st.rerun()
 
-    if app_mode == "📊 대시보드 뷰어":
+    st.write("") # 여백
+
+    # 사이드바 대신 메인 화면을 두 개의 큰 탭으로 분리
+    tab_view, tab_input = st.tabs(["📊 대시보드 뷰어", "📥 원장 관리 (자본 흐름 입력)"])
+
+    with tab_view:
         render_dashboard_ui()
-    else:
+
+    with tab_input:
         render_input_manager()
         
     # 하단 통합 테이블 검증 뷰 (항상 표시)
