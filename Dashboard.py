@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 import hashlib
 import re
+import time
 from datetime import datetime, timedelta
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # KIS API 매니저 임포트 (동일 폴더 내 KIS_API_Manager.py 필요)
 try:
@@ -17,7 +20,9 @@ st.set_page_config(page_title="Global Multi-Currency Reservoir", layout="wide", 
 
 TARGET_CURRENCIES = ['KRW', 'USD', 'JPY', 'HKD']
 EVENT_PRIORITY = {'Dividend': 1, 'Deposit': 2, 'Withdraw': 2, 'FX': 3, 'Trade': 4}
-LEDGER_PATH = "Unified_Ledger_V3.csv"
+
+# 절대 불변의 원본 DB 스키마 (13개 기둥)
+RAW_DB_COLUMNS = ['Date', 'PK_HASH', 'Source', 'Currency', 'Category', 'Type', 'Ticker', 'Name', 'Qty', 'Price', 'Amount_Local', 'Amount_KRW', 'Note']
 
 THEME_CARD = "#18181A"
 THEME_BORDER = "#444746"
@@ -29,28 +34,55 @@ st.markdown(f"""
     .stException {{ display: none; }}
     .item-card {{ background:{THEME_CARD}; padding:15px; border-radius:8px; height: 165px; margin-bottom: 15px; }}
     .cube-card {{ background:{THEME_CARD}; padding:20px; border-radius:10px; border:1px solid {THEME_BORDER}; text-align:center; }}
-    /* 탭 디자인 커스텀 (옵션) */
+    /* 탭 디자인 커스텀 */
     .stTabs [data-baseweb="tab-list"] {{ gap: 24px; }}
     .stTabs [data-baseweb="tab"] {{ height: 50px; white-space: pre-wrap; background-color: transparent; border-radius: 4px 4px 0px 0px; gap: 1px; padding-top: 10px; padding-bottom: 10px; }}
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. 데이터베이스 I/O 및 코어 엔진 (변경 없음)
+# 1. 데이터베이스 I/O (Google Sheets) & 코어 엔진
 # ==========================================
+def get_sheet_client():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return gspread.authorize(creds)
+
 def load_ledger():
+    """구글 스프레드시트에서 데이터를 불러옵니다."""
     try:
-        df = pd.read_csv(LEDGER_PATH)
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=[
-            'Date', 'Category', 'Type', 'Ticker', 'Name', 'Qty', 'Price', 
-            'Amount_Local', 'Amount_KRW', 'Currency', 'Source', 'PK_Hash'
-        ])
-    return df
+        client = get_sheet_client()
+        sh = client.open("Investment_Dashboard_DB")
+        ws = sh.worksheet("Unified_Ledger")
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=RAW_DB_COLUMNS)
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"DB 로드 실패: {e}")
+        return pd.DataFrame(columns=RAW_DB_COLUMNS)
 
 def save_ledger(df):
-    df.to_csv(LEDGER_PATH, index=False)
-    st.session_state.processed_ledger = calculate_reservoir_engine(df)
+    """구글 스프레드시트에 파생 변수를 제거하고 순수 데이터만 덮어씁니다."""
+    for col in RAW_DB_COLUMNS:
+        if col not in df.columns:
+            df[col] = ''
+            
+    # 파생 더미 열(Cash_KRW 등)을 날려버리고 순수 원시 데이터만 추출
+    df_to_save = df[RAW_DB_COLUMNS].copy()
+    
+    try:
+        client = get_sheet_client()
+        sh = client.open("Investment_Dashboard_DB")
+        ws = sh.worksheet("Unified_Ledger")
+        ws.clear()
+        ws.update([df_to_save.columns.values.tolist()] + df_to_save.fillna("").values.tolist())
+        
+        # 메모리(세션)에는 다시 파생 변수를 계산해서 띄워줌
+        st.session_state.processed_ledger = calculate_reservoir_engine(df_to_save)
+    except Exception as e:
+        st.error(f"DB 저장 실패: {e}")
 
 def generate_trade_hash(row):
     date_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
@@ -62,6 +94,8 @@ def sort_ledger_events(df):
     df['Priority'] = df['Category'].map(EVENT_PRIORITY).fillna(99)
     df['Date'] = pd.to_datetime(df['Date'])
     df_sorted = df.sort_values(by=['Date', 'Priority'], ascending=[True, True]).reset_index(drop=True)
+    # Date를 다시 문자열 포맷으로 변환 (Google Sheets 저장 최적화)
+    df_sorted['Date'] = df_sorted['Date'].dt.strftime('%Y-%m-%d %H:%M:%S')
     return df_sorted.drop(columns=['Priority'])
 
 def calculate_reservoir_engine(df):
@@ -124,7 +158,7 @@ def calculate_reservoir_engine(df):
     return df_calc
 
 # ==========================================
-# 2. 파싱 및 API 동기화 엔진 (변경 없음)
+# 2. 파싱 및 API 동기화 엔진
 # ==========================================
 def parse_kakao_money_events(text):
     events = []
@@ -143,11 +177,11 @@ def parse_kakao_money_events(text):
         krw_amt, curr, local_amt = (val1, match.group('sym2'), val2) if sym1 == '￦' else (val2, sym1, -val1)
         
         events.append({
-            'Date': f"{y}-{m}-{d} 00:00:00", 'Category': 'Money', 'Type': 'FX',
+            'Date': f"{y}-{m}-{d} 00:00:00", 'PK_HASH': '', 'Source': 'Kakao', 
+            'Currency': curr, 'Category': 'Money', 'Type': 'FX',
             'Ticker': '', 'Name': f"외화{match.group('fx_type')}환전", 'Qty': 0.0, 
             'Price': float(match.group('rate').replace(',', '')),
-            'Amount_Local': local_amt, 'Amount_KRW': krw_amt,
-            'Currency': curr, 'Source': 'Kakao', 'PK_Hash': ''
+            'Amount_Local': local_amt, 'Amount_KRW': krw_amt, 'Note': ''
         })
 
     div_pattern = re.compile(
@@ -157,10 +191,11 @@ def parse_kakao_money_events(text):
     for match in div_pattern.finditer(text):
         y, m, d = match.group('year'), match.group('month').zfill(2), match.group('day').zfill(2)
         events.append({
-            'Date': f"{y}-{m}-{d} 00:00:00", 'Category': 'Money', 'Type': 'Dividend',
+            'Date': f"{y}-{m}-{d} 00:00:00", 'PK_HASH': '', 'Source': 'Kakao', 
+            'Currency': match.group('curr'), 'Category': 'Money', 'Type': 'Dividend',
             'Ticker': match.group('ticker'), 'Name': '해외 배당금', 'Qty': 0.0, 'Price': 0.0,
             'Amount_Local': round(float(match.group('amt').replace(',', '')) * 0.85, 2), 
-            'Amount_KRW': 0.0, 'Currency': match.group('curr'), 'Source': 'Kakao', 'PK_Hash': ''
+            'Amount_KRW': 0.0, 'Note': ''
         })
 
     etf_pattern = re.compile(
@@ -172,9 +207,10 @@ def parse_kakao_money_events(text):
         y, m, d = match.group('year'), match.group('month').zfill(2), match.group('day').zfill(2)
         amt = float(match.group('amt').replace(',', ''))
         events.append({
-            'Date': f"{y}-{m}-{d} 00:00:00", 'Category': 'Money', 'Type': 'Dividend',
+            'Date': f"{y}-{m}-{d} 00:00:00", 'PK_HASH': '', 'Source': 'Kakao', 
+            'Currency': 'KRW', 'Category': 'Money', 'Type': 'Dividend',
             'Ticker': 'ETF', 'Name': match.group('name').strip(), 'Qty': 0.0, 'Price': 0.0,
-            'Amount_Local': amt, 'Amount_KRW': amt, 'Currency': 'KRW', 'Source': 'Kakao', 'PK_Hash': ''
+            'Amount_Local': amt, 'Amount_KRW': amt, 'Note': ''
         })
 
     return events
@@ -206,18 +242,18 @@ def sync_api_data():
     
     if fetched_dfs:
         api_df = pd.concat(fetched_dfs, ignore_index=True)
-        api_df['PK_Hash'] = api_df.apply(generate_trade_hash, axis=1)
+        api_df['PK_HASH'] = api_df.apply(generate_trade_hash, axis=1)
         
-        if 'PK_Hash' not in ledger_df.columns:
-            ledger_df['PK_Hash'] = ledger_df.apply(lambda x: generate_trade_hash(x) if x['Category'] == 'Trade' else None, axis=1)
+        if 'PK_HASH' not in ledger_df.columns:
+            ledger_df['PK_HASH'] = ledger_df.apply(lambda x: generate_trade_hash(x) if x['Category'] == 'Trade' else '', axis=1)
             
-        existing_hashes = ledger_df['PK_Hash'].dropna().tolist()
-        unique_new = api_df[~api_df['PK_Hash'].isin(existing_hashes)]
+        existing_hashes = ledger_df['PK_HASH'].dropna().tolist()
+        unique_new = api_df[~api_df['PK_HASH'].isin(existing_hashes)]
         
         if not unique_new.empty:
             updated_ledger = sort_ledger_events(pd.concat([ledger_df, unique_new], ignore_index=True))
             save_ledger(updated_ledger)
-            st.toast(f"✅ 신규 체결 {len(unique_new)}건이 병합되었습니다.", icon="✅")
+            st.toast(f"✅ 신규 체결 {len(unique_new)}건이 DB에 병합되었습니다.", icon="✅")
         else:
             st.toast("새로 업데이트할 체결 내역이 없습니다.", icon="ℹ️")
     else:
@@ -338,42 +374,60 @@ def render_dashboard_ui():
         st.write("")
 
 # ==========================================
-# 4. 입력 매니저 (텍스트 시간 입력으로 개선)
+# 4. 입력 매니저 (UX 개선: 텍스트 입력 및 초기화)
 # ==========================================
 def render_input_manager():
     st.info("💡 카카오톡 복사 내역 파싱 및 순수 원화 입출금을 기록합니다.")
     tab_manual, tab_kakao = st.tabs(["✍️ 순수 KRW 입출금", "💬 카카오톡 파싱 (배당/환전)"])
     
     with tab_manual:
-        with st.form("manual_krw_form"):
+        # 상태 관리: 날짜는 유지하고 시간은 제출 후 초기화되도록 설정
+        if 'ui_input_date' not in st.session_state:
+            st.session_state.ui_input_date = datetime.now().strftime("%Y%m%d")
+        if 'ui_input_time' not in st.session_state:
+            st.session_state.ui_input_time = ""
+            
+        with st.form("manual_krw_form", clear_on_submit=False):
             col1, col2, col3 = st.columns([1.5, 1, 1.5])
             with col1:
-                # 15분 단위 픽서 제거 -> 텍스트 타이핑 폼으로 변경
-                input_date = st.date_input("날짜 (YYYY-MM-DD)", datetime.today())
-                input_time_str = st.text_input("시간 (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"))
+                raw_date = st.text_input("날짜 (YYYYMMDD)", value=st.session_state.ui_input_date)
+                raw_time = st.text_input("시간 (HHMMSS)", value=st.session_state.ui_input_time, placeholder="예: 143000")
             with col2:
                 inout_type = st.radio("구분", ["Deposit (입금)", "Withdraw (출금)"])
             with col3:
                 krw_amount = st.number_input("금액 (KRW)", min_value=0, step=10000)
                 note = st.text_input("메모")
                 
-            if st.form_submit_button("원장 추가") and krw_amount > 0:
-                # 텍스트로 입력된 시간이 올바른 형식인지 검증
-                try:
-                    valid_time = datetime.strptime(input_time_str, "%H:%M:%S").time()
-                    dt_str = f"{input_date} {valid_time.strftime('%H:%M:%S')}"
-                    
-                    new_row = {
-                        'Date': dt_str, 'Category': 'Money',
-                        'Type': "Deposit" if "Deposit" in inout_type else "Withdraw",
-                        'Ticker': '', 'Name': note, 'Qty': 0.0, 'Price': 0.0,
-                        'Amount_Local': float(krw_amount), 'Amount_KRW': float(krw_amount),
-                        'Currency': 'KRW', 'Source': 'Manual_UI', 'PK_Hash': ''
-                    }
-                    save_ledger(sort_ledger_events(pd.concat([load_ledger(), pd.DataFrame([new_row])], ignore_index=True)))
-                    st.success(f"✅ {dt_str} 원장 추가 완료!")
-                except ValueError:
-                    st.error("시간 형식이 잘못되었습니다. (예: 14:30:00)")
+            submitted = st.form_submit_button("원장 추가")
+            
+            if submitted:
+                if len(raw_date) == 8 and len(raw_time) == 6 and krw_amount > 0:
+                    try:
+                        # 포맷팅 변환
+                        fmt_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+                        fmt_time = f"{raw_time[:2]}:{raw_time[2:4]}:{raw_time[4:]}"
+                        dt_str = f"{fmt_date} {fmt_time}"
+                        
+                        new_row = {
+                            'Date': dt_str, 'PK_HASH': '', 'Source': 'Manual_UI', 
+                            'Currency': 'KRW', 'Category': 'Money', 
+                            'Type': "Deposit" if "Deposit" in inout_type else "Withdraw",
+                            'Ticker': '', 'Name': '', 'Qty': 0.0, 'Price': 0.0,
+                            'Amount_Local': float(krw_amount), 'Amount_KRW': float(krw_amount), 'Note': note
+                        }
+                        
+                        save_ledger(sort_ledger_events(pd.concat([load_ledger(), pd.DataFrame([new_row])], ignore_index=True)))
+                        
+                        # 날짜는 킵하고 시간 칸만 초기화
+                        st.session_state.ui_input_date = raw_date
+                        st.session_state.ui_input_time = ""
+                        st.success(f"✅ {dt_str} 데이터가 구글 DB에 영구 저장되었습니다.")
+                        time.sleep(0.8) # 사용자에게 저장 완료 메시지 인지시킴
+                        st.rerun()      # 폼 초기화를 위한 리런
+                    except ValueError:
+                        st.error("숫자로만 날짜 8자리, 시간 6자리를 정확히 입력해주세요.")
+                else:
+                    st.error("날짜 8자리, 시간 6자리 입력 및 금액 0원 이상을 확인해주세요.")
 
     with tab_kakao:
         kakao_text = st.text_area("카톡 텍스트 입력", height=150)
@@ -389,22 +443,21 @@ def render_input_manager():
                 
         if not st.session_state.parsed_df_draft.empty:
             edited_df = st.data_editor(st.session_state.parsed_df_draft, num_rows="dynamic", use_container_width=True)
-            if st.button("💾 검수 완료 및 DB 병합"):
+            if st.button("💾 검수 완료 및 구글 DB 병합"):
                 save_ledger(sort_ledger_events(pd.concat([load_ledger(), edited_df], ignore_index=True)))
-                st.success("✅ 병합 완료!")
+                st.success("✅ 구글 DB에 안전하게 병합되었습니다!")
                 st.session_state.parsed_df_draft = pd.DataFrame()
+                time.sleep(0.8)
                 st.rerun()
 
 # ==========================================
-# 5. 앱 메인 루프 (사이드바 완전 폐기 & 탭 네비게이션)
+# 5. 앱 메인 루프
 # ==========================================
 def main():
-    # 1회 자동 초기화
     if 'initialized' not in st.session_state:
         st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
         st.session_state.initialized = True
         
-    # 최상단 글로벌 헤더 (타이틀 & 동기화 버튼)
     col_title, col_btn = st.columns([8, 2])
     with col_title: 
         st.title("🌊 Global Multi-Currency Reservoir")
@@ -414,9 +467,9 @@ def main():
             sync_api_data()
             st.rerun()
 
-    st.write("") # 여백
+    st.write("")
 
-    # 사이드바 대신 메인 화면을 두 개의 큰 탭으로 분리
+    # 메인 화면 탭 구성 (사이드바 폐기)
     tab_view, tab_input = st.tabs(["📊 대시보드 뷰어", "📥 원장 관리 (자본 흐름 입력)"])
 
     with tab_view:
@@ -425,9 +478,9 @@ def main():
     with tab_input:
         render_input_manager()
         
-    # 하단 통합 테이블 검증 뷰 (항상 표시)
+    # 하단 통합 테이블 검증 뷰
     st.divider()
-    with st.expander("🔍 통합 원장 데이터베이스 (Unified Ledger)"):
+    with st.expander("🔍 통합 원장 데이터베이스 (Unified Ledger - Calculated)"):
         st.dataframe(st.session_state.get('processed_ledger', pd.DataFrame()), use_container_width=True)
 
 if __name__ == "__main__":
