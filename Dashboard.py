@@ -163,8 +163,18 @@ def calculate_reservoir_engine(df):
 def parse_kakao_money_events(text):
     events = []
     
+    # 시간 변환 헬퍼 함수 (오전/오후 H:MM -> 24시간제 HH:MM:SS)
+    def convert_time(y, m, d, ampm, h, mnt):
+        h_int = int(h)
+        if ampm == '오후' and h_int < 12:
+            h_int += 12
+        elif ampm == '오전' and h_int == 12:
+            h_int = 0
+        return f"{y}-{m.zfill(2)}-{d.zfill(2)} {str(h_int).zfill(2)}:{mnt.zfill(2)}:00"
+
+    # 1. 환전 내역 정규식 (시간 추출 추가)
     fx_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일.*?\n"
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}).*?\n"
         r"(?:.*?\n){1,5}?"
         r"외화(?P<fx_type>매수|매도)환전\s*\n"
         r"(?P<sym1>￦|[A-Z]{3})\s*(?P<val1>[\d,.]+)\s*\n"
@@ -172,48 +182,59 @@ def parse_kakao_money_events(text):
         r"(?P<sym2>[A-Z]{3}|￦)\s*(?P<val2>[\d,.]+)"
     )
     for match in fx_pattern.finditer(text):
-        y, m, d = match.group('year'), match.group('month').zfill(2), match.group('day').zfill(2)
+        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), 
+                              match.group('ampm'), match.group('hour'), match.group('minute'))
+        
         sym1, val1, val2 = match.group('sym1'), float(match.group('val1').replace(',', '')), float(match.group('val2').replace(',', ''))
         krw_amt, curr, local_amt = (val1, match.group('sym2'), val2) if sym1 == '￦' else (val2, sym1, -val1)
         
         events.append({
-            'Date': f"{y}-{m}-{d} 00:00:00", 'PK_HASH': '', 'Source': 'Kakao', 
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 
             'Currency': curr, 'Category': 'Money', 'Type': 'FX',
             'Ticker': '', 'Name': f"외화{match.group('fx_type')}환전", 'Qty': 0.0, 
             'Price': float(match.group('rate').replace(',', '')),
             'Amount_Local': local_amt, 'Amount_KRW': krw_amt, 'Note': ''
         })
 
+    # 2. 해외 배당금 정규식 (시간 추출 추가)
     div_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일.*?\n(?:.*?\n)?.*?\d{2}/\d{2}\s*\n"
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}).*?\n"
+        r"(?:.*?\n)?.*?\d{2}/\d{2}\s*\n"
         r"(?P<ticker>[A-Z0-9]+)[^\n]*\n(?P<curr>[A-Z]{3})\s*(?P<amt>[\d,.]+)\s*\n세전배당입금"
     )
     for match in div_pattern.finditer(text):
-        y, m, d = match.group('year'), match.group('month').zfill(2), match.group('day').zfill(2)
+        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), 
+                              match.group('ampm'), match.group('hour'), match.group('minute'))
+                              
         events.append({
-            'Date': f"{y}-{m}-{d} 00:00:00", 'PK_HASH': '', 'Source': 'Kakao', 
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 
             'Currency': match.group('curr'), 'Category': 'Money', 'Type': 'Dividend',
             'Ticker': match.group('ticker'), 'Name': '해외 배당금', 'Qty': 0.0, 'Price': 0.0,
             'Amount_Local': round(float(match.group('amt').replace(',', '')) * 0.85, 2), 
             'Amount_KRW': 0.0, 'Note': ''
         })
 
+    # 3. 국내 ETF 분배금 정규식 (시간 추출 추가)
     etf_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일.*?\n(?:.*?\n)*?"
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}).*?\n"
+        r"(?:.*?\n)*?"
         r"ETF 결산분배금 입금 안내\s*\n\*\s*종목명\s*:\s*(?P<name>[^\n]+)\s*\n(?:.*?\n)*?"
         r"\*\s*입금액\s*:\s*(?P<amt>[\d,]+)원"
     )
     for match in etf_pattern.finditer(text):
-        y, m, d = match.group('year'), match.group('month').zfill(2), match.group('day').zfill(2)
+        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), 
+                              match.group('ampm'), match.group('hour'), match.group('minute'))
+                              
         amt = float(match.group('amt').replace(',', ''))
         events.append({
-            'Date': f"{y}-{m}-{d} 00:00:00", 'PK_HASH': '', 'Source': 'Kakao', 
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 
             'Currency': 'KRW', 'Category': 'Money', 'Type': 'Dividend',
             'Ticker': 'ETF', 'Name': match.group('name').strip(), 'Qty': 0.0, 'Price': 0.0,
             'Amount_Local': amt, 'Amount_KRW': amt, 'Note': ''
         })
 
     return events
+
 
 def sync_api_data():
     st.toast("📡 KIS API와 통신을 시작합니다...", icon="🔄")
