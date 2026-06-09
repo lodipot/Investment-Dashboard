@@ -49,7 +49,7 @@ class KIS_API_Manager:
             st.error(f"토큰 스토리지 접근 오류 (시트가 없거나 권한 문제): {e}")
             return None
 
-    def _issue_new_token(self, ws):
+def _issue_new_token(self, ws):
         """KIS API에 새 토큰을 요청하고 구글 시트에 저장합니다."""
         url = f"{self.base_url}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
@@ -59,6 +59,7 @@ class KIS_API_Manager:
             "appsecret": self.app_secret
         }
         res = requests.post(url, headers=headers, json=body)
+        
         if res.status_code == 200:
             token = res.json().get("access_token")
             issued_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -67,7 +68,9 @@ class KIS_API_Manager:
             ws.update([["Token", "Issued_Time"], [token, issued_time]])
             return token
         else:
-            st.error("KIS API 토큰 발급 실패")
+            # 🔴 여기서 한투 서버가 뱉어내는 '진짜 거절 사유'를 화면에 띄웁니다.
+            error_detail = res.json().get('msg1', res.text)
+            st.error(f"🚫 KIS API 토큰 발급 거절 사유: {error_detail}")
             return None
 
     def _get_common_headers(self, tr_id):
