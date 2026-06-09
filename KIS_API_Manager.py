@@ -1,237 +1,156 @@
-import streamlit as st
 import requests
-import json
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
-import time
-import hashlib
-# =========================================================
-# [1] 설정 및 상수
-# =========================================================
-try:
-    URL_BASE = st.secrets["kis_api"]["URL_BASE"]
-    APP_KEY = st.secrets["kis_api"]["APP_KEY"]
-    APP_SECRET = st.secrets["kis_api"]["APP_SECRET"]
-    CANO = st.secrets["kis_api"]["CANO"]
-    ACNT_PRDT_CD = st.secrets["kis_api"]["ACNT_PRDT_CD"]
-except Exception:
-    st.error("secrets.toml 파일 설정을 확인해주세요.")
-    st.stop()
+import pandas as pd
+import streamlit as st
+from datetime import datetime
 
-# =========================================================
-# [2] 토큰 관리 (Smart Refresh)
-# =========================================================
-def get_sheet_client():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(creds)
+class KIS_API_Manager:
+    def __init__(self, app_key, app_secret, account_no):
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.account_no = account_no
+        self.base_url = "https://openapi.koreainvestment.com:9443" # 실전투자 URL
+        self.token = self.get_access_token()
 
-def get_access_token(force_refresh=False):
-    if not force_refresh and 'kis_token' in st.session_state:
-        return st.session_state['kis_token']
-
-    client = get_sheet_client()
-    try:
-        sh = client.open("Investment_Dashboard_DB")
-        ws = sh.worksheet("Token_Storage")
-        token_val = ws.acell('A1').value
-        expiry_val = ws.acell('B1').value
-        
-        if not force_refresh and token_val and expiry_val:
-            expiry_dt = datetime.strptime(expiry_val, "%Y-%m-%d %H:%M:%S")
-            if datetime.now() < expiry_dt - timedelta(hours=1):
-                st.session_state['kis_token'] = token_val
-                return token_val
-    except:
-        pass
-
-    headers = {"content-type": "application/json"}
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET
-    }
-    
-    try:
-        res = requests.post(f"{URL_BASE}/oauth2/tokenP", headers=headers, data=json.dumps(body))
-        data = res.json()
-        
-        if res.status_code == 200 and 'access_token' in data:
-            new_token = data['access_token']
-            expires_in = data['expires_in']
-            expiry_dt = datetime.now() + timedelta(seconds=expires_in)
-            
-            try:
-                ws.update_acell('A1', new_token)
-                ws.update_acell('B1', expiry_dt.strftime("%Y-%m-%d %H:%M:%S"))
-            except:
-                pass
-            
-            st.session_state['kis_token'] = new_token
-            return new_token
-        return None
-    except Exception as e:
-        print(f"Token Error: {e}")
-        return None
-
-def _request_api(method, url, headers, params=None, body=None):
-    if method == 'GET':
-        res = requests.get(url, headers=headers, params=params)
-    else:
-        res = requests.post(url, headers=headers, data=json.dumps(body))
-    
-    if res.status_code != 200 or res.json().get('msg_cd') == 'EGW00123':
-        new_token = get_access_token(force_refresh=True)
-        if not new_token: return res
-        
-        headers["authorization"] = f"Bearer {new_token}"
-        if method == 'GET':
-            res = requests.get(url, headers=headers, params=params)
+    def get_access_token(self):
+        """접근 토큰 발급 (캐싱 적용 권장)"""
+        url = f"{self.base_url}/oauth2/tokenP"
+        headers = {"content-type": "application/json"}
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret
+        }
+        res = requests.post(url, headers=headers, json=body)
+        if res.status_code == 200:
+            return res.json().get("access_token")
         else:
-            res = requests.post(url, headers=headers, data=json.dumps(body))
+            st.error("KIS API 토큰 발급 실패")
+            return None
+
+    def _get_common_headers(self, tr_id):
+        """공통 헤더 생성"""
+        return {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {self.token}",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret,
+            "tr_id": tr_id,
+            "custtype": "P" # 개인
+        }
+
+    # ==========================================
+    # 1. 원장 생성 계층 (Unified Ledger용)
+    # ==========================================
+    def fetch_trade_history(self, start_date, end_date, market_code="NASD"):
+        """
+        [CTOS4001R] 해외주식 일별거래내역
+        Unified_Ledger 스키마에 완벽히 맞춘 DataFrame 반환
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+        headers = self._get_common_headers("CTOS4001R")
+        
+        # 계좌번호 분리 (앞 8자리, 뒤 2자리)
+        cano = self.account_no[:8]
+        acnt_prdt_cd = self.account_no[8:]
+        
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "INQR_STRT_DT": start_date,
+            "INQR_END_DT": end_date,
+            "SHTN_PDNO": "",
+            "ORD_ENX_DVSN_CD": market_code, # NASD(나스닥), NYSE(뉴욕), TYO(일본) 등
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+        
+        if res.status_code != 200:
+            return pd.DataFrame() # 에러 시 빈 데이터프레임 반환
+
+        data = res.json().get("output", [])
+        if not data:
+            return pd.DataFrame()
+
+        processed_data = []
+        for item in data:
+            # 거래 일자 포맷팅
+            raw_date = item.get("ord_dt") # YYYYMMDD
+            fmt_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}" if raw_date else ""
             
-    return res
+            # 매매 구분 (매수/매도) - API 응답 코드에 따라 조정 필요
+            sll_buy_dvsn = item.get("sll_buy_dvsn_cd") 
+            trade_type = "Buy" if sll_buy_dvsn == "02" else "Sell" if sll_buy_dvsn == "01" else "Unknown"
 
-def get_current_price(ticker):
-    token = get_access_token()
-    if not token: return 0.0
+            # 통화 결정 (시장 코드 기반)
+            currency = "JPY" if market_code == "TYO" else "USD"
 
-    headers = {
-        "content-type": "application/json",
-        "authorization": f"Bearer {token}",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET,
-        "tr_id": "HHDFS00000300"
-    }
-    
-    markets = ["NYS", "NAS", "AMS"]
-    for mkt in markets:
-        params = {"AUTH": "", "EXCD": mkt, "SYMB": ticker}
-        try:
-            res = _request_api('GET', f"{URL_BASE}/uapi/overseas-price/v1/quotations/price", headers, params=params)
-            if res.status_code == 200:
-                data = res.json()
-                if data['rt_cd'] == '0':
-                    return float(data['output']['last'])
-        except:
-            continue
-    return 0.0
+            processed_data.append({
+                "Date": fmt_date,
+                "Ticker": item.get("pdno"),
+                "Name": item.get("prdt_name"),
+                "Type": trade_type,
+                "Qty": float(item.get("ccld_qty", 0)),
+                "Price": float(item.get("ft_ccld_unpr3", 0)),
+                "Currency": currency,
+                "Category": "Trade",
+                "Source": "API"
+            })
 
-# =========================================================
-# [3] 핵심: 하이브리드 거래내역 조회 (기간별 + 잔고)
-# =========================================================
-def get_trade_history(start_date, end_date):
-    token = get_access_token()
-    if not token: return None
+        df = pd.DataFrame(processed_data)
+        # Unified Ledger 형식에 맞춰 반환
+        return df[['Date', 'Category', 'Type', 'Ticker', 'Name', 'Qty', 'Price', 'Currency', 'Source']]
 
-    final_result = []
-
-    # --- TRACK A: 기간별 결제내역 조회 (CTOS4001R) ---
-    # * 목적: 이미 결제(T+3)가 끝나서 원장에 박제된 '확정 데이터' 조회
-    try:
-        headers_hist = {
-            "content-type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": APP_KEY,
-            "appsecret": APP_SECRET,
-            "tr_id": "CTOS4001R", 
-            "custtype": "P"
-        }
+    # ==========================================
+    # 2. Audit (검증) 계층
+    # ==========================================
+    def fetch_settled_balance(self, market_code="NASD"):
+        """
+        [CTRP6010R] 해외주식 결제기준 잔고
+        DB 원장의 보유 수량과 증권사 실제 결제 수량을 대조하기 위한 용도
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
+        headers = self._get_common_headers("CTRP6010R")
         
-        params_hist = {
-            "CANO": CANO,
-            "ACNT_PRDT_CD": ACNT_PRDT_CD,
-            "ORD_DT_S": start_date, # YYYYMMDD
-            "ORD_DT_E": end_date,   # YYYYMMDD
-            "WCRC_DVSN": "00",      # 외화기준
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": ""
-        }
+        cano = self.account_no[:8]
+        acnt_prdt_cd = self.account_no[8:]
         
-        res_hist = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-period-trans", headers_hist, params=params_hist)
-        
-        if res_hist.status_code == 200:
-            data = res_hist.json()
-            if 'output1' in data:
-                for item in data['output1']:
-                    if item.get('dt') and float(item.get('ccld_qty', 0)) > 0:
-                        final_result.append({
-                            'dt': item['dt'],  # 날짜
-                            'pdno': item['pdno'], # 종목코드
-                            'prdt_name': item['ovrs_item_name'],
-                            'sll_buy_dvsn_cd': item['sll_buy_dvsn_cd'], # 01:매도, 02:매수
-                            'ccld_qty': str(int(float(item['ccld_qty']))),
-                            'ft_ccld_unpr3': item.get('ovrs_stck_ccld_unpr', '0') # 체결단가
-                        })
-    except Exception:
-        pass
-
-    # --- TRACK B: 체결기준 현재잔고 조회 (CTRP6504R) ---
-    # * 목적: 아직 결제일이 안 되어 A트랙에 안 뜨는 '당일/최근 체결분' 확인
-    # * 2월 3일 거래(미결제)는 여기서 잡힐 것입니다.
-    try:
-        headers_bal = {
-            "content-type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": APP_KEY,
-            "appsecret": APP_SECRET,
-            "tr_id": "CTRP6504R", # 체결기준잔고
-            "custtype": "P"
-        }
-        
-        params_bal = {
-            "CANO": CANO,
-            "ACNT_PRDT_CD": ACNT_PRDT_CD,
-            "WCRC_FRCR_DVSN_CD": "01",
-            "NATN_CD": "840", # 미국
-            "TR_MKET_CD": "00",
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "WCRC_FRCR_DVSN_CD": "02", # 02: 외화
+            "NATN_CD": "840" if market_code != "TYO" else "392", # 840: 미국, 392: 일본
+            "TR_MKET_CD": "00", 
             "INQR_DVSN_CD": "00"
         }
-        
-        res_bal = _request_api('GET', f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-present-balance", headers_bal, params=params_bal)
-        
-        if res_bal.status_code == 200:
-            data_bal = res_bal.json()
-            if 'output1' in data_bal:
-                for item in data_bal['output1']:
-                    # 금일 매수 체결 수량(thdt_buy_ccld_qty1) 확인
-                    today_buy = float(item.get('thdt_buy_ccld_qty1', 0))
-                    
-                    if today_buy > 0:
-                        # 잔고 API는 날짜를 안 주므로 '오늘'로 가정하고 생성
-                        final_result.append({
-                            'dt': datetime.now().strftime("%Y%m%d"), 
-                            'pdno': item['pdno'],
-                            'prdt_name': item['prdt_name'],
-                            'sll_buy_dvsn_cd': '02', # 매수
-                            'ccld_qty': str(int(today_buy)),
-                            'ft_ccld_unpr3': item.get('pchs_avg_pric', '0') # 매입평균가 사용
-                        })
-    except Exception:
-        pass
 
-    return {'output1': final_result}
-
-def sync_api_to_ledger(client, df_ledger):
-    """
-    Unified_Ledger 시트의 Pending 내역을 API(당일 체결 조회 등) 내역과 대조하여
-    정확한 Timestamp와 Order_No로 업데이트합니다.
-    (세부적인 KIS API 호출 로직은 기존 토큰 구조를 활용하여 구현)
-    """
-    ws = client.open("Investment_Dashboard_DB").worksheet("Unified_Ledger")
-    
-    # 향후 구현: 실제 KIS 체결 API(TTTS3035R 등)를 호출하여 api_records 리스트를 만듦
-    api_records = [] 
-    
-    for api_rec in api_records:
-        # 매칭 로직 (종목, 수량, 가격이 일치하는 Pending 레코드 탐색)
-        mask = (df_ledger['Status'] == 'Pending') & (df_ledger['Ticker'] == api_rec['Ticker']) & (df_ledger['Quantity'] == api_rec['Quantity'])
-        matching_rows = df_ledger[mask]
+        res = requests.get(url, headers=headers, params=params)
         
-        if not matching_rows.empty:
-            sheet_row = int(matching_rows.index[0]) + 2 # 헤더 보정
-            ws.update_cell(sheet_row, 2, 'Confirmed') # Status
-            ws.update_cell(sheet_row, 3, api_rec['Timestamp']) # 정확한 체결시간 덮어쓰기
-            ws.update_cell(sheet_row, 13, api_rec['Order_No']) # Order_No 기록
+        if res.status_code == 200:
+            return res.json().get("output1", [])
+        return []
+
+    def fetch_foreign_currency_balance(self):
+        """
+        [TTTC2101R] 해외증거금 통화별 조회
+        USD 저수지와 JPY 저수지의 실제 예수금(Cash) 현황을 각각 분리하여 가져옴
+        """
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-margin"
+        headers = self._get_common_headers("TTTC2101R")
+        
+        cano = self.account_no[:8]
+        acnt_prdt_cd = self.account_no[8:]
+        
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "TR_CRCY_CD": "" # 공란 시 전체 통화 조회
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+        
+        if res.status_code == 200:
+            # output1에서 USD, JPY 등 각 통화별 예수금 추출
+            return res.json().get("output1", [])
+        return []
