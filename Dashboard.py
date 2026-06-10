@@ -260,13 +260,13 @@ def sync_api_data():
         trade_dates = pd.to_datetime(ledger_df[ledger_df['Category'] == 'Trade']['Date'])
         start_date = (trade_dates.max() - timedelta(days=3)).strftime('%Y%m%d')
     else:
-        # 한투 API의 한 번 조회 최대 기간인 90일로 세팅
+        # 최초 동기화 시 90일치를 긁어옵니다.
         start_date = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
         
     end_date = datetime.now().strftime('%Y%m%d')
     
-    # 🔴 수정 완료: KIS API 규격에 맞춘 시장 코드 (01: 미국, 04: 일본, 02: 홍콩)
-    target_markets = ["01", "04", "02"] 
+    # 🔴 수정 완료: TTTS3035R 규격에 맞춘 영문 시장 코드
+    target_markets = ["NASD", "NYSE", "AMEX", "TYO", "SEHK"]
     
     fetched_dfs = [api_manager.fetch_trade_history(start_date, end_date, m) for m in target_markets]
     fetched_dfs = [df for df in fetched_dfs if not df.empty]
@@ -292,6 +292,7 @@ def sync_api_data():
         
     st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
     st.session_state.initialized = True
+
 
 
 # ==========================================
