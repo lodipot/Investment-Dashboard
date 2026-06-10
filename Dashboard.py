@@ -216,20 +216,15 @@ def sync_api_data():
         trade_dates = pd.to_datetime(ledger_df[ledger_df['Category'] == 'Trade']['Date'])
         start_date = (trade_dates.max() - timedelta(days=7)).strftime('%Y%m%d')
     else:
-        # 🔴 하드코딩 추적 범위 수정: 첫 계좌 개설 및 자본 흐름 시작일인 2025년 12월 30일로 정밀 잠금
+        # 최초 시작일 2025년 12월 30일로 고정
         start_date = "20251230"
         
     end_date = datetime.now().strftime('%Y%m%d')
-    target_markets = ["NASD", "NYSE", "AMEX", "TYO", "SEHK"]
     
-    fetched_dfs = []
-    for market in target_markets:
-        df_market = api_manager.fetch_trade_history(start_date, end_date, market)
-        if not df_market.empty:
-            fetched_dfs.append(df_market)
+    # 🔴 여러 시장을 돌지 않고, API 매니저에서 '통합'으로 한 번에 호출합니다.
+    api_df = api_manager.fetch_trade_history(start_date, end_date)
     
-    if fetched_dfs:
-        api_df = pd.concat(fetched_dfs, ignore_index=True)
+    if not api_df.empty:
         api_df['PK_HASH'] = api_df.apply(generate_trade_hash, axis=1)
         
         if 'PK_HASH' not in ledger_df.columns:
@@ -249,7 +244,8 @@ def sync_api_data():
         
     st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
     st.session_state.initialized = True
-    # 🔴 st.rerun()을 도려내어 디버그 완료 화면이 사라지지 않도록 디버깅 홀딩 처리 완료
+    # 디버그 확인을 위해 st.rerun()은 주석 처리 유지
+
 
 # ==========================================
 # 4. 포트폴리오 및 UI 렌더링 계층
