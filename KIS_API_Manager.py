@@ -87,10 +87,9 @@ class KIS_API_Manager:
     # ==========================================
     # 1. 원장 생성 계층 (Unified Ledger용)
     # ==========================================
-    def fetch_trade_history(self, start_date, end_date, market_code="NASD"):
+def fetch_trade_history(self, start_date, end_date, market_code="NASD"):
         """
         [TTTS3035R] 해외주식 체결내역 (한투 공식 권장 API)
-        Unified_Ledger 13개 스키마에 완벽히 맞춘 DataFrame 반환
         """
         if not self.token:
             return pd.DataFrame()
@@ -98,17 +97,18 @@ class KIS_API_Manager:
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
         headers = self._get_common_headers("TTTS3035R")
         
+        # 🔴 KIS 담당자가 확인해준 "작동 보장 파라미터 셋" 적용
         params = {
             "CANO": self.account_no[:8],
             "ACNT_PRDT_CD": self.account_no[8:],
-            "PDNO": "",               # 전체 종목 조회
+            "PDNO": "%",              # 🔴 ""(공란) 대신 "%" 적용 (전체조회 힌트)
             "ORD_STRT_DT": start_date,
             "ORD_END_DT": end_date,
-            "SLL_BUY_DVSN_CD": "00",  # 00: 전체 (매수/매도 모두)
-            "CCLD_NCCS_DVSN": "01",   # 01: 체결된 건만 (미체결 제외)
-            "OVRS_EXCG_CD": market_code, # NASD, NYSE, AMEX, TYO, SEHK
-            "SORT_SQN": "DS",         # 과거순/최신순 정렬
-            "ORD_DT": "",
+            "SLL_BUY_DVSN_CD": "00",  # 00: 전체
+            "CCLD_NCCS_DVSN": "00",   # 🔴 "01"(체결) 대신 "00"(전체) 적용 (작동 사례 반영)
+            "OVRS_EXCG_CD": market_code, # 외부에서 주입 (NASD, NYSE 등)
+            "SORT_SQN": "DS",         
+            "ORD_DT": "",             # 작동 사례대로 공란 유지
             "BRKR_ORD_SEQ": "",
             "CTX_AREA_FK200": "",
             "CTX_AREA_NK200": ""
@@ -117,6 +117,7 @@ class KIS_API_Manager:
         res = requests.get(url, headers=headers, params=params)
         res_json = res.json()
         
+        # 에러 발생 시 로그 출력
         if res_json.get("rt_cd") != "0":
             st.error(f"[{market_code}] KIS API 에러: {res_json.get('msg1')}")
             return pd.DataFrame()
@@ -127,6 +128,11 @@ class KIS_API_Manager:
 
         processed_data = []
         for item in data:
+            # 🔴 미체결 건이 섞여 들어올 수 있으므로 자체 필터링
+            qty = float(item.get("ccld_qty", 0))
+            if qty == 0: 
+                continue # 체결 수량이 0이면 스킵
+
             raw_date = item.get("ord_dt", "") 
             raw_time = item.get("ord_tmd", "000000") 
             if not raw_date: continue
@@ -148,11 +154,11 @@ class KIS_API_Manager:
                 "Type": trade_type,
                 "Ticker": item.get("pdno"),
                 "Name": item.get("prdt_name", item.get("pdno")),
-                "Qty": float(item.get("ccld_qty", 0)),
-                "Price": float(item.get("ft_ccld_unpr3", 0)), # 외화 체결 단가
+                "Qty": qty,
+                "Price": float(item.get("ft_ccld_unpr3", 0)), 
                 "Amount_Local": 0.0,
                 "Amount_KRW": 0.0,
-                "Note": f"{market_code} API"
+                "Note": f"{market_code} 체결"
             })
 
         return pd.DataFrame(processed_data)
