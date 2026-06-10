@@ -49,7 +49,7 @@ class KIS_API_Manager:
             st.error(f"토큰 스토리지 접근 오류 (시트가 없거나 권한 문제): {e}")
             return None
 
-def _issue_new_token(self, ws):
+    def _issue_new_token(self, ws):
         """KIS API에 새 토큰을 요청하고 구글 시트에 저장합니다."""
         url = f"{self.base_url}/oauth2/tokenP"
         headers = {"content-type": "application/json"}
@@ -74,7 +74,7 @@ def _issue_new_token(self, ws):
             return None
 
     def _get_common_headers(self, tr_id):
-        """공통 헤더 생성 (PM님 원본 유지)"""
+        """공통 헤더 생성"""
         return {
             "content-type": "application/json; charset=utf-8",
             "authorization": f"Bearer {self.token}",
@@ -89,7 +89,7 @@ def _issue_new_token(self, ws):
     # ==========================================
     def fetch_trade_history(self, start_date, end_date, market_code="NASD"):
         """
-        [CTOS4001R] 해외주식 일별거래내역 (PM님 원본 유지)
+        [CTOS4001R] 해외주식 일별거래내역
         Unified_Ledger 13개 스키마에 완벽히 맞춘 DataFrame 반환
         """
         if not self.token:
@@ -140,7 +140,7 @@ def _issue_new_token(self, ws):
             # 13개 RAW DB 스키마에 정확히 매핑
             processed_data.append({
                 "Date": dt_str,
-                "PK_HASH": "", # Dashboard.py에서 나중에 해시 생성됨
+                "PK_HASH": "", 
                 "Source": "API",
                 "Currency": currency,
                 "Category": "Trade",
@@ -157,13 +157,10 @@ def _issue_new_token(self, ws):
         return pd.DataFrame(processed_data)
 
     # ==========================================
-    # 2. Audit (검증) 계층 (PM님 원본 유지)
+    # 2. Audit (검증) 계층
     # ==========================================
     def fetch_settled_balance(self, market_code="NASD"):
-        """
-        [CTRP6010R] 해외주식 결제기준 잔고
-        DB 원장의 보유 수량과 증권사 실제 결제 수량을 대조하기 위한 용도
-        """
+        """[CTRP6010R] 해외주식 결제기준 잔고"""
         if not self.token: return []
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
         headers = self._get_common_headers("CTRP6010R")
@@ -183,10 +180,7 @@ def _issue_new_token(self, ws):
         return []
 
     def fetch_foreign_currency_balance(self):
-        """
-        [TTTC2101R] 해외증거금 통화별 조회
-        USD 저수지와 JPY 저수지의 실제 예수금(Cash) 현황을 각각 분리하여 가져옴
-        """
+        """[TTTC2101R] 해외증거금 통화별 조회"""
         if not self.token: return []
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-margin"
         headers = self._get_common_headers("TTTC2101R")
