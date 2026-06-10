@@ -71,15 +71,16 @@ class KIS_API_Manager:
             "custtype": "P"
         }
 
-    def fetch_trade_history(self, start_date, end_date, market_code="NASD"):
+    def fetch_trade_history(self, start_date, end_date):
         """
-        [TTTS3035R] 해외주식 체결내역 API (30일 단위 분할 덤프 및 실시간 디버깅 모드)
+        [CTOS4001R] 해외주식 일별거래내역 (과거 원장 영구 조회용)
+        - 시장 구분 없이(00) 한 번에 30일 단위로 모두 가져옵니다.
         """
         if not self.token:
             return pd.DataFrame()
 
-        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-        headers = self._get_common_headers("TTTS3035R")
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+        headers = self._get_common_headers("CTOS4001R")
         
         start_dt = datetime.strptime(start_date, "%Y%m%d")
         end_dt = datetime.strptime(end_date, "%Y%m%d")
@@ -93,15 +94,10 @@ class KIS_API_Manager:
             params = {
                 "CANO": self.account_no[:8],
                 "ACNT_PRDT_CD": self.account_no[8:],
-                "PDNO": "%",              
-                "ORD_STRT_DT": current_start.strftime("%Y%m%d"),
-                "ORD_END_DT": current_end.strftime("%Y%m%d"),
-                "SLL_BUY_DVSN_CD": "00",  
-                "CCLD_NCCS_DVSN": "00",   
-                "OVRS_EXCG_CD": market_code, 
-                "SORT_SQN": "DS",
-                "ORD_DT": "",
-                "BRKR_ORD_SEQ": "",
+                "INQR_STRT_DT": current_start.strftime("%Y%m%d"),
+                "INQR_END_DT": current_end.strftime("%Y%m%d"),
+                "SHTN_PDNO": "",              # 공란: 전체 종목
+                "ORD_ENX_DVSN_CD": "00",      # 🔴 00: 전체 국가/시장 (NASD, NYSE 분리 불필요)
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
@@ -109,28 +105,26 @@ class KIS_API_Manager:
             res = requests.get(url, headers=headers, params=params)
             res_json = res.json()
             
-            # 실시간 로그 노출 계층 (새로고침으로 사라지지 않음)
-            with st.expander(f"🔍 [디버그] {market_code} ({current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')})"):
+            with st.expander(f"🔍 [디버그] 통합조회 ({current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')})"):
                 st.write(f"**요청 인자:** {params}")
                 st.json(res_json)
             
             if res_json.get("rt_cd") == "0":
                 data = res_json.get("output", [])
                 for item in data:
-                    qty = float(item.get("ccld_qty", 0))
-                    if qty == 0: continue 
-
-                    raw_date = item.get("ord_dt", "") 
-                    raw_time = item.get("ord_tmd", "000000") 
+                    raw_date = item.get("trad_dt", "") # CTOS4001R은 trad_dt 사용
                     if not raw_date: continue
                     
-                    dt_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]} {raw_time[:2]}:{raw_time[2:4]}:{raw_time[4:]}"
+                    # 일별거래내역은 시간이 안 나오므로 00:00:00으로 세팅
+                    dt_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]} 00:00:00"
                     
                     sll_buy_dvsn = item.get("sll_buy_dvsn_cd") 
                     trade_type = "Buy" if sll_buy_dvsn == "02" else "Sell" if sll_buy_dvsn == "01" else "Unknown"
                     if trade_type == "Unknown": continue
 
-                    currency = "JPY" if market_code == "TYO" else ("HKD" if market_code == "SEHK" else "USD")
+                    ticker = item.get("pdno", "")
+                    # 티커가 숫자면 일본(JPY), 문자면 미국(USD)으로 자동 판별
+                    currency = "JPY" if ticker.isdigit() else "USD"
 
                     processed_data.append({
                         "Date": dt_str,
@@ -139,13 +133,13 @@ class KIS_API_Manager:
                         "Currency": currency,
                         "Category": "Trade",
                         "Type": trade_type,
-                        "Ticker": item.get("pdno"),
-                        "Name": item.get("prdt_name", item.get("pdno")),
-                        "Qty": qty,
-                        "Price": float(item.get("ft_ccld_unpr3", 0)), 
+                        "Ticker": ticker,
+                        "Name": item.get("ovrs_item_name", ticker),
+                        "Qty": float(item.get("ccld_qty", 0)),
+                        "Price": float(item.get("ft_ccld_unpr2", 0)), # ft_ccld_unpr2: 외화체결단가
                         "Amount_Local": 0.0,
                         "Amount_KRW": 0.0,
-                        "Note": f"{market_code} API 동기화"
+                        "Note": "API 자동동기화"
                     })
 
             current_start = current_end + timedelta(days=1)
