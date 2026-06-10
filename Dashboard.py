@@ -265,11 +265,14 @@ def sync_api_data():
         
     end_date = datetime.now().strftime('%Y%m%d')
     
-    # 🔴 수정 완료: TTTS3035R 규격에 맞춘 영문 시장 코드
+    # 🔴 각 거래소별(미국 3대장, 일본, 홍콩)로 꼼꼼하게 다 찔러봅니다.
     target_markets = ["NASD", "NYSE", "AMEX", "TYO", "SEHK"]
     
-    fetched_dfs = [api_manager.fetch_trade_history(start_date, end_date, m) for m in target_markets]
-    fetched_dfs = [df for df in fetched_dfs if not df.empty]
+    fetched_dfs = []
+    for market in target_markets:
+        df_market = api_manager.fetch_trade_history(start_date, end_date, market)
+        if not df_market.empty:
+            fetched_dfs.append(df_market)
     
     if fetched_dfs:
         api_df = pd.concat(fetched_dfs, ignore_index=True)
