@@ -258,16 +258,15 @@ def sync_api_data():
     ledger_df = load_ledger()
     if not ledger_df.empty and 'Trade' in ledger_df['Category'].values:
         trade_dates = pd.to_datetime(ledger_df[ledger_df['Category'] == 'Trade']['Date'])
-        # 마지막 거래일로부터 일주일 전부터 안전하게 스위핑
         start_date = (trade_dates.max() - timedelta(days=7)).strftime('%Y%m%d')
     else:
-        # 최초 동기화 시 넉넉하게 1년 치(365일)를 요청 (매니저가 알아서 30일씩 쪼개서 요청함)
+        # 최초 동기화 시 1년 치(365일) 요청. API 매니저가 알아서 30일씩 쪼갭니다.
         start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
         
     end_date = datetime.now().strftime('%Y%m%d')
     
-    # 🔴 CTOS4001R 규격에 맞춘 숫자 시장 코드 (01: 미국 전체, 04: 일본 전체, 02: 홍콩)
-    target_markets = ["01", "04", "02"] 
+    # TTTS3035R 규격에 맞춘 영문 시장 코드
+    target_markets = ["NASD", "NYSE", "AMEX", "TYO", "SEHK"]
     
     fetched_dfs = []
     for market in target_markets:
