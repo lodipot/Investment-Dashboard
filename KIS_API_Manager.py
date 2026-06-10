@@ -87,11 +87,7 @@ class KIS_API_Manager:
     # ==========================================
     # 1. 원장 생성 계층 (Unified Ledger용)
     # ==========================================
-    def fetch_trade_history(self, start_date, end_date, market_code="NASD"):
-        """
-        [CTOS4001R] 해외주식 일별거래내역
-        Unified_Ledger 13개 스키마에 완벽히 맞춘 DataFrame 반환
-        """
+    def fetch_trade_history(self, start_date, end_date, market_code="01"):
         if not self.token:
             return pd.DataFrame()
 
@@ -107,37 +103,41 @@ class KIS_API_Manager:
             "INQR_STRT_DT": start_date,
             "INQR_END_DT": end_date,
             "SHTN_PDNO": "",
+            # NASD 대신 01(미국), 04(일본) 등의 코드가 들어갑니다.
             "ORD_ENX_DVSN_CD": market_code, 
             "CTX_AREA_FK200": "",
             "CTX_AREA_NK200": ""
         }
 
         res = requests.get(url, headers=headers, params=params)
+        res_json = res.json()
         
-        if res.status_code != 200:
+        # 🔴 핵심 디버깅: 한투 API가 뱉어내는 '진짜 거절 사유'를 화면에 띄웁니다.
+        if res_json.get("rt_cd") != "0":
+            st.error(f"[{market_code}] KIS API 에러 발생: {res_json.get('msg1')}")
             return pd.DataFrame()
 
-        data = res.json().get("output", [])
+        data = res_json.get("output", [])
         if not data:
             return pd.DataFrame()
 
         processed_data = []
         for item in data:
-            # 거래 일자 및 시간 포맷팅 (시간 정보가 있으면 살리고 없으면 00:00:00)
-            raw_date = item.get("ord_dt", "") # YYYYMMDD
-            raw_time = item.get("ord_tmd", "000000") # HHMMSS
+            raw_date = item.get("ord_dt", "") 
+            raw_time = item.get("ord_tmd", "000000") 
             if not raw_date: continue
             
             dt_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]} {raw_time[:2]}:{raw_time[2:4]}:{raw_time[4:]}"
             
             sll_buy_dvsn = item.get("sll_buy_dvsn_cd") 
             trade_type = "Buy" if sll_buy_dvsn == "02" else "Sell" if sll_buy_dvsn == "01" else "Unknown"
-            
             if trade_type == "Unknown": continue
 
-            currency = "JPY" if market_code == "TYO" else ("HKD" if market_code == "SEHK" else "USD")
+            # 응답 데이터에 통화 코드가 있으면 쓰고, 없으면 시장 코드로 유추
+            currency = item.get("crcy_cd")
+            if not currency:
+                currency = "JPY" if market_code == "04" else ("HKD" if market_code == "02" else "USD")
 
-            # 13개 RAW DB 스키마에 정확히 매핑
             processed_data.append({
                 "Date": dt_str,
                 "PK_HASH": "", 
@@ -148,13 +148,14 @@ class KIS_API_Manager:
                 "Ticker": item.get("pdno"),
                 "Name": item.get("prdt_name"),
                 "Qty": float(item.get("ccld_qty", 0)),
-                "Price": float(item.get("ft_ccld_unpr3", 0)),
+                "Price": float(item.get("ft_ccld_unpr3", 0)), # 외화 체결 단가
                 "Amount_Local": 0.0,
                 "Amount_KRW": 0.0,
-                "Note": f"{market_code} 자동동기화"
+                "Note": "API 자동동기화"
             })
 
         return pd.DataFrame(processed_data)
+
 
     # ==========================================
     # 2. Audit (검증) 계층
