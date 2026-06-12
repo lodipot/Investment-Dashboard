@@ -3,7 +3,7 @@ import pandas as pd
 import hashlib
 import re
 import time
-import requests # 🔴 추가됨: API 직접 호출용
+import requests
 from datetime import datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -29,6 +29,7 @@ COLOR_BLUE = "#448AFF"
 
 st.markdown(f"""
     <style>
+    .stException {{ display: none; }}
     .item-card {{ background:{THEME_CARD}; padding:15px; border-radius:8px; height: 165px; margin-bottom: 15px; }}
     .cube-card {{ background:{THEME_CARD}; padding:20px; border-radius:10px; border:1px solid {THEME_BORDER}; text-align:center; }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 24px; }}
@@ -72,11 +73,6 @@ def save_ledger(df):
         st.session_state.processed_ledger = calculate_reservoir_engine(df_to_save)
     except Exception as e:
         st.error(f"구글 DB 저장 실패: {e}")
-
-def generate_trade_hash(row):
-    date_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
-    raw_str = f"{date_str}_{row['Ticker']}_{row['Type']}_{row['Qty']}_{row['Price']}"
-    return hashlib.sha256(raw_str.encode('utf-8')).hexdigest()
 
 def sort_ledger_events(df):
     if df.empty: return df
@@ -142,8 +138,33 @@ def calculate_reservoir_engine(df):
     df_calc['Attached_FX_Rate'] = res_attached_rate
     return df_calc
 
+def build_portfolio(df):
+    portfolio = {}
+    if df.empty or 'Trade' not in df['Category'].values: return portfolio
+    for row in df[df['Category'] == 'Trade'].itertuples():
+        tk = row.Ticker
+        if tk not in portfolio:
+            portfolio[tk] = {'Name': row.Name, 'Currency': row.Currency, 'Qty': 0.0, 'Total_Cost_Local': 0.0, 'Total_Cost_KRW': 0.0}
+        if row.Type == 'Buy':
+            portfolio[tk]['Qty'] += row.Qty
+            portfolio[tk]['Total_Cost_Local'] += row.Qty * row.Price
+            portfolio[tk]['Total_Cost_KRW'] += (row.Qty * row.Price) * row.Attached_FX_Rate
+        elif row.Type == 'Sell' and portfolio[tk]['Qty'] > 0:
+            ratio = row.Qty / portfolio[tk]['Qty']
+            portfolio[tk]['Total_Cost_Local'] -= portfolio[tk]['Total_Cost_Local'] * ratio
+            portfolio[tk]['Total_Cost_KRW'] -= portfolio[tk]['Total_Cost_KRW'] * ratio
+            portfolio[tk]['Qty'] -= row.Qty
+
+    active_portfolio = {}
+    for tk, data in portfolio.items():
+        if data['Qty'] > 0.00001: 
+            data['Avg_Price'] = data['Total_Cost_Local'] / data['Qty']
+            data['Attached_FX_Rate'] = data['Total_Cost_KRW'] / data['Total_Cost_Local'] if data['Total_Cost_Local'] > 0 else 0
+            active_portfolio[tk] = data
+    return active_portfolio
+
 # ==========================================
-# 2. 카카오톡 대화 파서 엔진
+# 2. 카카오톡 대화 파서 엔진 
 # ==========================================
 def parse_kakao_money_events(text):
     events = []
@@ -194,56 +215,54 @@ def parse_kakao_money_events(text):
             'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': 'KRW', 'Category': 'Money', 'Type': 'Dividend',
             'Ticker': 'ETF', 'Name': match.group('name').strip(), 'Qty': 0.0, 'Price': 0.0, 'Amount_Local': amt, 'Amount_KRW': amt, 'Note': ''
         })
+        
+    trade_pattern = re.compile(
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
+        r"(?:.*?\n){0,4}?"
+        r"\*매매구분:(?P<type>매수|매도)\s*\n"
+        r"\*종목명:(?P<ticker>[A-Z0-9]+)[^\n]*\n"
+        r"\*체결수량:(?P<qty>[\d,.]+)주\s*\n"
+        r"\*체결단가:(?P<curr>[A-Z]{3})\s*(?P<price>[\d,.]+)"
+    )
+    for match in trade_pattern.finditer(text):
+        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
+        events.append({
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': match.group('curr'), 'Category': 'Trade', 
+            'Type': 'Buy' if match.group('type') == '매수' else 'Sell',
+            'Ticker': match.group('ticker'), 'Name': match.group('ticker'), 
+            'Qty': float(match.group('qty').replace(',', '')), 'Price': float(match.group('price').replace(',', '')),
+            'Amount_Local': 0.0, 'Amount_KRW': 0.0, 'Note': '카톡(HTS매매)'
+        })
+
+    mini_pattern = re.compile(
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
+        r"(?:.*?\n)*?"
+        r"-\s*구매\(매수\)\s*체결\s*:\s*\d+건,\s*체결금액\s*(?P<buy_amt>[\d,]+)원\s*\n"
+        r"-\s*팔기\(매도\)\s*체결\s*:\s*\d+건,\s*체결금액\s*(?P<sell_amt>[\d,]+)원"
+    )
+    for match in mini_pattern.finditer(text):
+        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
+        buy_amt = float(match.group('buy_amt').replace(',', ''))
+        sell_amt = float(match.group('sell_amt').replace(',', ''))
+        
+        if buy_amt > 0:
+            events.append({
+                'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao_Mini', 'Currency': 'KRW', 'Category': 'Money', 'Type': 'Withdraw',
+                'Ticker': '', 'Name': '미니스탁 매수출금', 'Qty': 0.0, 'Price': 0.0, 'Amount_Local': buy_amt, 'Amount_KRW': buy_amt, 'Note': ''
+            })
+        if sell_amt > 0:
+            events.append({
+                'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao_Mini', 'Currency': 'KRW', 'Category': 'Money', 'Type': 'Deposit',
+                'Ticker': '', 'Name': '미니스탁 매도입금', 'Qty': 0.0, 'Price': 0.0, 'Amount_Local': sell_amt, 'Amount_KRW': sell_amt, 'Note': ''
+            })
+
     return events
 
 # ==========================================
-# 3. KIS API 동기화 및 잔고 테스트 (모바일 전용)
+# 3. KIS API 실시간 잔고 검증 엔진 (Audit) 및 핀셋 디버거
 # ==========================================
-def sync_api_data():
-    st.toast("📡 KIS API와 통신을 시작합니다...", icon="🔄")
-    try:
-        app_key = st.secrets["kis_api"]["APP_KEY"]
-        app_secret = st.secrets["kis_api"]["APP_SECRET"]
-        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
-    except Exception:
-        st.error("secrets.toml 파일에 KIS API 정보가 설정되어 있지 않습니다.")
-        return
-
-    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: return
-
-    ledger_df = load_ledger()
-    if not ledger_df.empty and 'Trade' in ledger_df['Category'].values:
-        trade_dates = pd.to_datetime(ledger_df[ledger_df['Category'] == 'Trade']['Date'])
-        start_date = (trade_dates.max() - timedelta(days=7)).strftime('%Y%m%d')
-    else:
-        start_date = "20251230"
-        
-    end_date = datetime.now().strftime('%Y%m%d')
-    api_df = api_manager.fetch_trade_history(start_date, end_date)
-    
-    if not api_df.empty:
-        api_df['PK_HASH'] = api_df.apply(generate_trade_hash, axis=1)
-        if 'PK_HASH' not in ledger_df.columns:
-            ledger_df['PK_HASH'] = ledger_df.apply(lambda x: generate_trade_hash(x) if x['Category'] == 'Trade' else '', axis=1)
-        existing_hashes = ledger_df['PK_HASH'].dropna().tolist()
-        unique_new = api_df[~api_df['PK_HASH'].isin(existing_hashes)]
-        
-        if not unique_new.empty:
-            updated_ledger = sort_ledger_events(pd.concat([ledger_df, unique_new], ignore_index=True))
-            save_ledger(updated_ledger)
-            st.success(f"✅ 신규 체결 {len(unique_new)}건이 구글 DB 원장에 영구 반영되었습니다.")
-        else:
-            st.info("새로 업데이트할 체결 내역이 없습니다.")
-    else:
-        st.info("해당 기간에 발생한 체결 내역이 없습니다.")
-        
-    st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
-    st.session_state.initialized = True
-
-# 🔴 [추가됨] 모바일 잔고 리트머스 테스트용 함수
-def test_balance_api():
-    st.toast("📡 계좌 잔고를 실시간으로 스캔합니다...", icon="🧪")
+def audit_realtime_balance():
+    st.toast("📡 한투 서버와 실시간으로 잔고를 대조합니다...", icon="🧪")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -258,53 +277,100 @@ def test_balance_api():
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
 
-    # 1. 주식 잔고 (CTRP6504R)
     url_stock = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
     headers_stock = api_manager._get_common_headers("CTRP6504R")
     params_stock = {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
     res_stock = requests.get(url_stock, headers=headers_stock, params=params_stock)
     
-    # 2. 외화 예수금 (TTTC2101R)
     url_cash = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/foreign-margin"
     headers_cash = api_manager._get_common_headers("TTTC2101R")
     params_cash = {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "TR_CRCY_CD": ""}
     res_cash = requests.get(url_cash, headers=headers_cash, params=params_cash)
 
-    st.warning("🚨 [리트머스 결과] 아래 상자 안에 리얼티인컴(O)이나 NVDA 등 보유하신 주식이 안 보인다면, API로는 영원히 매매내역을 연동할 수 없습니다.")
-    with st.expander("📦 보유 주식 실시간 잔고 (열어보세요)", expanded=True):
-        st.json(res_stock.json())
-    with st.expander("💵 외화 예수금 현황 (열어보세요)"):
-        st.json(res_cash.json())
+    df_ledger = load_ledger()
+    ledger_calc = calculate_reservoir_engine(df_ledger)
+    my_portfolio = build_portfolio(ledger_calc)
+    my_usd = ledger_calc.iloc[-1]['Cash_USD'] if not ledger_calc.empty else 0.0
 
+    kis_usd = 0.0
+    kis_portfolio = {}
+    
+    if res_cash.status_code == 200:
+        for item in res_cash.json().get("output2", []):
+            if item.get("crcy_cd") == "USD":
+                kis_usd = float(item.get("frcr_dncl_amt_2", 0))
+                
+    if res_stock.status_code == 200:
+        for item in res_stock.json().get("output1", []):
+            tk = item.get("pdno", "")
+            qty = float(item.get("cblc_qty13", 0))
+            if tk and qty > 0:
+                kis_portfolio[tk] = qty
+
+    st.subheader("🕵️‍♂️ 회계 감사 (Audit) 결과")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**💰 달러(USD) 예수금 대조**")
+        diff_usd = my_usd - kis_usd
+        st.write(f"우리 DB 계산: $ {my_usd:,.2f}")
+        st.write(f"한투 실제잔고: $ {kis_usd:,.2f}")
+        if abs(diff_usd) < 0.1: st.success("오차 없음 (Perfect!)")
+        else: st.error(f"오차 발생: $ {diff_usd:,.2f} (카톡 알림 누락분 확인 요망)")
+
+    with col2:
+        st.markdown("**📦 보유 주식 수량 대조**")
+        all_tickers = set(list(my_portfolio.keys()) + list(kis_portfolio.keys()))
+        for tk in all_tickers:
+            my_qty = my_portfolio.get(tk, {}).get('Qty', 0)
+            kis_qty = kis_portfolio.get(tk, 0)
+            diff_qty = my_qty - kis_qty
+            
+            st.write(f"- **{tk}** | DB: {my_qty:,.2f}주 vs 한투: {kis_qty:,.2f}주")
+            if abs(diff_qty) > 0.0001:
+                st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
+    st.divider()
+
+# 🔴 [추가됨] 5월 29일 단하루 핀셋 디버그용 함수
+def run_precision_test():
+    st.toast("🎯 2026년 5월 29일 핀셋 테스트를 시작합니다...", icon="🎯")
+    try:
+        app_key = st.secrets["kis_api"]["APP_KEY"]
+        app_secret = st.secrets["kis_api"]["APP_SECRET"]
+        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
+    except Exception:
+        st.error("secrets.toml 에러: KIS 키값이 없습니다.")
+        return
+
+    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
+    if not api_manager.token: return
+
+    cano = api_manager.account_no[:8]
+    acnt_cd = api_manager.account_no[8:]
+
+    headers = api_manager._get_common_headers("CTOS4001R")
+    
+    # 빈 파라미터(CTX_AREA) 아예 제거, 5/29일 하루만 고정 조회
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_cd,
+        "INQR_STRT_DT": "20260529",
+        "INQR_END_DT": "20260529",
+        "SHTN_PDNO": "",        
+        "ORD_ENX_DVSN_CD": "00"
+    }
+
+    url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+    res = requests.get(url, headers=headers, params=params)
+    
+    st.warning("🎯 [2026년 5월 29일 리얼티인컴 매수일 단하루 핀셋 테스트 결과]")
+    st.write(f"요청 파라미터: {params}")
+    with st.expander("응답 원본 JSON 보기", expanded=True):
+        st.json(res.json())
 
 # ==========================================
 # 4. 포트폴리오 및 UI 렌더링 계층
 # ==========================================
-def build_portfolio(df):
-    portfolio = {}
-    if df.empty or 'Trade' not in df['Category'].values: return portfolio
-    for row in df[df['Category'] == 'Trade'].itertuples():
-        tk = row.Ticker
-        if tk not in portfolio:
-            portfolio[tk] = {'Name': row.Name, 'Currency': row.Currency, 'Qty': 0.0, 'Total_Cost_Local': 0.0, 'Total_Cost_KRW': 0.0}
-        if row.Type == 'Buy':
-            portfolio[tk]['Qty'] += row.Qty
-            portfolio[tk]['Total_Cost_Local'] += row.Qty * row.Price
-            portfolio[tk]['Total_Cost_KRW'] += (row.Qty * row.Price) * row.Attached_FX_Rate
-        elif row.Type == 'Sell' and portfolio[tk]['Qty'] > 0:
-            ratio = row.Qty / portfolio[tk]['Qty']
-            portfolio[tk]['Total_Cost_Local'] -= portfolio[tk]['Total_Cost_Local'] * ratio
-            portfolio[tk]['Total_Cost_KRW'] -= portfolio[tk]['Total_Cost_KRW'] * ratio
-            portfolio[tk]['Qty'] -= row.Qty
-
-    active_portfolio = {}
-    for tk, data in portfolio.items():
-        if data['Qty'] > 0.0001: 
-            data['Avg_Price'] = data['Total_Cost_Local'] / data['Qty']
-            data['Attached_FX_Rate'] = data['Total_Cost_KRW'] / data['Total_Cost_Local'] if data['Total_Cost_Local'] > 0 else 0
-            active_portfolio[tk] = data
-    return active_portfolio
-
 def render_dashboard_ui():
     df = st.session_state.get('processed_ledger', pd.DataFrame())
     if df.empty:
@@ -369,7 +435,7 @@ def render_dashboard_ui():
         st.write("")
 
 def render_input_manager():
-    tab_manual, tab_kakao = st.tabs(["✍️ 순수 KRW 입출금", "💬 카카오톡 파싱 (배당/환전)"])
+    tab_manual, tab_kakao = st.tabs(["✍️ 순수 KRW 입출금", "💬 카카오톡 텍스트 파싱 (모든 내역)"])
     with tab_manual:
         if 'ui_input_date' not in st.session_state: st.session_state.ui_input_date = datetime.now().strftime("%Y%m%d")
         if 'ui_input_time' not in st.session_state: st.session_state.ui_input_time = ""
@@ -400,19 +466,20 @@ def render_input_manager():
                 else: st.error("날짜 8자리, 시간 6자리를 채워주세요.")
 
     with tab_kakao:
-        kakao_text = st.text_area("카톡 텍스트 입력", height=150)
+        kakao_text = st.text_area("카톡 텍스트 입력 (환전, 배당, 온주 및 미니스탁 매매까지 모두 자동 파싱)", height=150)
         if 'parsed_df_draft' not in st.session_state: st.session_state.parsed_df_draft = pd.DataFrame()
-        if st.button("🚀 파싱 (초안 생성)") and kakao_text:
+        if st.button("🚀 전체 파싱 (초안 생성)") and kakao_text:
             draft_events = parse_kakao_money_events(kakao_text)
             if draft_events:
                 st.session_state.parsed_df_draft = pd.DataFrame(draft_events)
-                st.success(f"{len(draft_events)}건 추출 완료.")
+                st.success(f"{len(draft_events)}건 추출 완료. (하단 표 확인)")
             else: st.warning("추출 가능한 데이터가 없습니다.")
+            
         if not st.session_state.parsed_df_draft.empty:
             edited_df = st.data_editor(st.session_state.parsed_df_draft, num_rows="dynamic", use_container_width=True)
-            if st.button("💾 검수 완료 및 구글 DB 병합"):
+            if st.button("💾 검수 완료 및 구글 DB 영구 병합"):
                 save_ledger(sort_ledger_events(pd.concat([load_ledger(), edited_df], ignore_index=True)))
-                st.success("✅ 구글 DB에 안전하게 병합되었습니다!")
+                st.success("✅ 구글 DB 원장에 완벽히 병합되었습니다!")
                 st.session_state.parsed_df_draft = pd.DataFrame()
                 time.sleep(0.8)
                 st.rerun()
@@ -430,17 +497,17 @@ def main():
         st.title("🌊 Global Multi-Currency Reservoir")
     with col_btn1:
         st.write("")
-        if st.button("🔄 최신 매매내역 동기화", use_container_width=True):
-            sync_api_data()
+        if st.button("🧪 DB-한투 잔고 실시간 검증", use_container_width=True):
+            audit_realtime_balance()
     with col_btn2:
         st.write("")
-        # 🔴 모바일 확인용 테스트 버튼 생성
-        if st.button("🧪 KIS 잔고 테스트", use_container_width=True):
-            test_balance_api()
+        # 🔴 새로운 핀셋 테스트 버튼 부착
+        if st.button("🔍 5월 29일 핀셋 디버그 테스트", use_container_width=True):
+            run_precision_test()
 
     st.write("")
 
-    tab_view, tab_input = st.tabs(["📊 대시보드 뷰어", "📥 원장 관리 (자본 흐름 입력)"])
+    tab_view, tab_input = st.tabs(["📊 대시보드 뷰어", "📥 원장 관리 (자본 흐름 & 카톡 파싱)"])
 
     with tab_view:
         render_dashboard_ui()
