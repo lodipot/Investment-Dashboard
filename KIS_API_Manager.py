@@ -73,8 +73,8 @@ class KIS_API_Manager:
 
     def fetch_trade_history(self, start_date, end_date):
         """
-        [CTOS4001R] 해외주식 일별거래내역 (과거 원장 영구 조회용)
-        - 시장 구분 없이(00) 한 번에 30일 단위로 모두 가져옵니다.
+        [CTOS4001R] 해외주식 일별거래내역 (장기 데이터 영구 보존용)
+        - 시장 구분 없이(00) 한 번에 30일 단위로 싹쓸이
         """
         if not self.token:
             return pd.DataFrame()
@@ -96,8 +96,8 @@ class KIS_API_Manager:
                 "ACNT_PRDT_CD": self.account_no[8:],
                 "INQR_STRT_DT": current_start.strftime("%Y%m%d"),
                 "INQR_END_DT": current_end.strftime("%Y%m%d"),
-                "SHTN_PDNO": "",              # 공란: 전체 종목
-                "ORD_ENX_DVSN_CD": "00",      # 🔴 00: 전체 국가/시장 (NASD, NYSE 분리 불필요)
+                "SHTN_PDNO": "",              # 한투 공식 가이드: 공란 시 전체 종목
+                "ORD_ENX_DVSN_CD": "00",      # 00: 전체 국가/시장 한 번에 조회
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": ""
             }
@@ -105,17 +105,17 @@ class KIS_API_Manager:
             res = requests.get(url, headers=headers, params=params)
             res_json = res.json()
             
+            # 눈으로 직접 확인할 수 있도록 디버그 패널 출력 (정상/실패 모두 노출)
             with st.expander(f"🔍 [디버그] 통합조회 ({current_start.strftime('%Y-%m-%d')} ~ {current_end.strftime('%Y-%m-%d')})"):
-                st.write(f"**요청 인자:** {params}")
+                st.write(f"**요청 파라미터:** {params}")
                 st.json(res_json)
             
             if res_json.get("rt_cd") == "0":
                 data = res_json.get("output", [])
                 for item in data:
-                    raw_date = item.get("trad_dt", "") # CTOS4001R은 trad_dt 사용
+                    # CTOS4001R은 시간 제공을 안하므로 00:00:00 으로 기록
+                    raw_date = item.get("trad_dt", "") 
                     if not raw_date: continue
-                    
-                    # 일별거래내역은 시간이 안 나오므로 00:00:00으로 세팅
                     dt_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]} 00:00:00"
                     
                     sll_buy_dvsn = item.get("sll_buy_dvsn_cd") 
@@ -123,7 +123,6 @@ class KIS_API_Manager:
                     if trade_type == "Unknown": continue
 
                     ticker = item.get("pdno", "")
-                    # 티커가 숫자면 일본(JPY), 문자면 미국(USD)으로 자동 판별
                     currency = "JPY" if ticker.isdigit() else "USD"
 
                     processed_data.append({
@@ -136,7 +135,7 @@ class KIS_API_Manager:
                         "Ticker": ticker,
                         "Name": item.get("ovrs_item_name", ticker),
                         "Qty": float(item.get("ccld_qty", 0)),
-                        "Price": float(item.get("ft_ccld_unpr2", 0)), # ft_ccld_unpr2: 외화체결단가
+                        "Price": float(item.get("ft_ccld_unpr2", 0)), 
                         "Amount_Local": 0.0,
                         "Amount_KRW": 0.0,
                         "Note": "API 자동동기화"
