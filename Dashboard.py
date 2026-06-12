@@ -331,9 +331,9 @@ def audit_realtime_balance():
                 st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
     st.divider()
 
-# 🔴 [추가됨] 5월 29일 단하루 핀셋 디버그용 함수
+# 🔴 [수정됨] 5월 27일 ~ 30일 (시차 고려) 핀셋 디버그용 함수
 def run_precision_test():
-    st.toast("🎯 2026년 5월 29일 핀셋 테스트를 시작합니다...", icon="🎯")
+    st.toast("🎯 2026년 5월 27일 ~ 30일(시차 고려) 핀셋 테스트를 시작합니다...", icon="🎯")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -350,12 +350,12 @@ def run_precision_test():
 
     headers = api_manager._get_common_headers("CTOS4001R")
     
-    # 빈 파라미터(CTX_AREA) 아예 제거, 5/29일 하루만 고정 조회
+    # 🔴 핵심 변경: 시차를 고려해 5/27 ~ 5/30 까지 넓게 잡고, 시장은 "00(전체)"로 던집니다.
     params = {
         "CANO": cano,
         "ACNT_PRDT_CD": acnt_cd,
-        "INQR_STRT_DT": "20260529",
-        "INQR_END_DT": "20260529",
+        "INQR_STRT_DT": "20260527",
+        "INQR_END_DT": "20260530",
         "SHTN_PDNO": "",        
         "ORD_ENX_DVSN_CD": "00"
     }
@@ -363,10 +363,11 @@ def run_precision_test():
     url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
     res = requests.get(url, headers=headers, params=params)
     
-    st.warning("🎯 [2026년 5월 29일 리얼티인컴 매수일 단하루 핀셋 테스트 결과]")
+    st.warning("🎯 [시차 고려 핀셋 테스트 결과]")
     st.write(f"요청 파라미터: {params}")
-    with st.expander("응답 원본 JSON 보기", expanded=True):
+    with st.expander("📦 응답 원본 JSON 보기 (이 안에 데이터가 있어야 합니다!)", expanded=True):
         st.json(res.json())
+
 
 # ==========================================
 # 4. 포트폴리오 및 UI 렌더링 계층
