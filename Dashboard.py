@@ -216,12 +216,12 @@ def sync_api_data():
         trade_dates = pd.to_datetime(ledger_df[ledger_df['Category'] == 'Trade']['Date'])
         start_date = (trade_dates.max() - timedelta(days=7)).strftime('%Y%m%d')
     else:
-        # 최초 시작일 2025년 12월 30일로 고정
+        # 최초 자본 유입 시작점인 2025년 12월 30일로 고정
         start_date = "20251230"
         
     end_date = datetime.now().strftime('%Y%m%d')
     
-    # 🔴 여러 시장을 돌지 않고, API 매니저에서 '통합'으로 한 번에 호출합니다.
+    # 🔴 CTOS4001R 전용: 루프 돌 필요 없이 매니저 내부에서 '통합(00)'으로 한 번에 조회합니다.
     api_df = api_manager.fetch_trade_history(start_date, end_date)
     
     if not api_df.empty:
@@ -236,7 +236,7 @@ def sync_api_data():
         if not unique_new.empty:
             updated_ledger = sort_ledger_events(pd.concat([ledger_df, unique_new], ignore_index=True))
             save_ledger(updated_ledger)
-            st.success(f"✅ 신규 체결 {len(unique_new)}건이 구글 DB 원장에 영구 반영되었습니다.")
+            st.success(f"✅ 신규 체결 {len(unique_new)}건이 DB에 병합되었습니다! (하단 원장 확인)")
         else:
             st.info("새로 업데이트할 체결 내역이 없습니다.")
     else:
@@ -244,7 +244,10 @@ def sync_api_data():
         
     st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
     st.session_state.initialized = True
-    # 디버그 확인을 위해 st.rerun()은 주석 처리 유지
+    
+    # 🔴 화면 증발 방지용 리런 주석 처리
+    # st.rerun() 
+
 
 
 # ==========================================
