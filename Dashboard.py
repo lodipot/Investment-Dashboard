@@ -3,6 +3,7 @@ import pandas as pd
 import hashlib
 import re
 import time
+import requests # 🔴 추가됨: API 직접 호출용
 from datetime import datetime, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -196,7 +197,7 @@ def parse_kakao_money_events(text):
     return events
 
 # ==========================================
-# 3. KIS API 동기화 스위핑 로직
+# 3. KIS API 동기화 및 잔고 테스트 (모바일 전용)
 # ==========================================
 def sync_api_data():
     st.toast("📡 KIS API와 통신을 시작합니다...", icon="🔄")
@@ -216,27 +217,22 @@ def sync_api_data():
         trade_dates = pd.to_datetime(ledger_df[ledger_df['Category'] == 'Trade']['Date'])
         start_date = (trade_dates.max() - timedelta(days=7)).strftime('%Y%m%d')
     else:
-        # 최초 자본 유입 시작점인 2025년 12월 30일로 고정
         start_date = "20251230"
         
     end_date = datetime.now().strftime('%Y%m%d')
-    
-    # 🔴 CTOS4001R 전용: 루프 돌 필요 없이 매니저 내부에서 '통합(00)'으로 한 번에 조회합니다.
     api_df = api_manager.fetch_trade_history(start_date, end_date)
     
     if not api_df.empty:
         api_df['PK_HASH'] = api_df.apply(generate_trade_hash, axis=1)
-        
         if 'PK_HASH' not in ledger_df.columns:
             ledger_df['PK_HASH'] = ledger_df.apply(lambda x: generate_trade_hash(x) if x['Category'] == 'Trade' else '', axis=1)
-            
         existing_hashes = ledger_df['PK_HASH'].dropna().tolist()
         unique_new = api_df[~api_df['PK_HASH'].isin(existing_hashes)]
         
         if not unique_new.empty:
             updated_ledger = sort_ledger_events(pd.concat([ledger_df, unique_new], ignore_index=True))
             save_ledger(updated_ledger)
-            st.success(f"✅ 신규 체결 {len(unique_new)}건이 DB에 병합되었습니다! (하단 원장 확인)")
+            st.success(f"✅ 신규 체결 {len(unique_new)}건이 구글 DB 원장에 영구 반영되었습니다.")
         else:
             st.info("새로 업데이트할 체결 내역이 없습니다.")
     else:
@@ -244,10 +240,41 @@ def sync_api_data():
         
     st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
     st.session_state.initialized = True
-    
-    # 🔴 화면 증발 방지용 리런 주석 처리
-    # st.rerun() 
 
+# 🔴 [추가됨] 모바일 잔고 리트머스 테스트용 함수
+def test_balance_api():
+    st.toast("📡 계좌 잔고를 실시간으로 스캔합니다...", icon="🧪")
+    try:
+        app_key = st.secrets["kis_api"]["APP_KEY"]
+        app_secret = st.secrets["kis_api"]["APP_SECRET"]
+        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
+    except Exception:
+        st.error("secrets.toml 에러: KIS 키값이 없습니다.")
+        return
+
+    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
+    if not api_manager.token: return
+
+    cano = api_manager.account_no[:8]
+    acnt_cd = api_manager.account_no[8:]
+
+    # 1. 주식 잔고 (CTRP6504R)
+    url_stock = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
+    headers_stock = api_manager._get_common_headers("CTRP6504R")
+    params_stock = {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
+    res_stock = requests.get(url_stock, headers=headers_stock, params=params_stock)
+    
+    # 2. 외화 예수금 (TTTC2101R)
+    url_cash = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/foreign-margin"
+    headers_cash = api_manager._get_common_headers("TTTC2101R")
+    params_cash = {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "TR_CRCY_CD": ""}
+    res_cash = requests.get(url_cash, headers=headers_cash, params=params_cash)
+
+    st.warning("🚨 [리트머스 결과] 아래 상자 안에 리얼티인컴(O)이나 NVDA 등 보유하신 주식이 안 보인다면, API로는 영원히 매매내역을 연동할 수 없습니다.")
+    with st.expander("📦 보유 주식 실시간 잔고 (열어보세요)", expanded=True):
+        st.json(res_stock.json())
+    with st.expander("💵 외화 예수금 현황 (열어보세요)"):
+        st.json(res_cash.json())
 
 
 # ==========================================
@@ -385,30 +412,41 @@ def render_input_manager():
             edited_df = st.data_editor(st.session_state.parsed_df_draft, num_rows="dynamic", use_container_width=True)
             if st.button("💾 검수 완료 및 구글 DB 병합"):
                 save_ledger(sort_ledger_events(pd.concat([load_ledger(), edited_df], ignore_index=True)))
-                st.success("✅ 구글 DB에 병합되었습니다.")
+                st.success("✅ 구글 DB에 안전하게 병합되었습니다!")
                 st.session_state.parsed_df_draft = pd.DataFrame()
                 time.sleep(0.8)
                 st.rerun()
 
 # ==========================================
-# 5. 앱 실행 제어 진입점
+# 5. 앱 메인 루프
 # ==========================================
 def main():
     if 'initialized' not in st.session_state:
         st.session_state.processed_ledger = calculate_reservoir_engine(load_ledger())
         st.session_state.initialized = True
         
-    col_title, col_btn = st.columns([8, 2])
-    with col_title: st.title("🌊 Global Multi-Currency Reservoir")
-    with col_btn:
+    col_title, col_btn1, col_btn2 = st.columns([6, 2, 2])
+    with col_title: 
+        st.title("🌊 Global Multi-Currency Reservoir")
+    with col_btn1:
         st.write("")
         if st.button("🔄 최신 매매내역 동기화", use_container_width=True):
             sync_api_data()
+    with col_btn2:
+        st.write("")
+        # 🔴 모바일 확인용 테스트 버튼 생성
+        if st.button("🧪 KIS 잔고 테스트", use_container_width=True):
+            test_balance_api()
 
     st.write("")
+
     tab_view, tab_input = st.tabs(["📊 대시보드 뷰어", "📥 원장 관리 (자본 흐름 입력)"])
-    with tab_view: render_dashboard_ui()
-    with tab_input: render_input_manager()
+
+    with tab_view:
+        render_dashboard_ui()
+
+    with tab_input:
+        render_input_manager()
         
     st.divider()
     with st.expander("🔍 통합 원장 데이터베이스 (Unified Ledger - Calculated)"):
