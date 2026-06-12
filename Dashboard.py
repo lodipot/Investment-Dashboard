@@ -331,9 +331,9 @@ def audit_realtime_balance():
                 st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
     st.divider()
 
-# 🔴 [수정됨] 5월 27일 ~ 30일 (시차 고려) 핀셋 디버그용 함수
+# 🔴 [최종 교체] 자동화된 십자포화 디버그 테스트
 def run_precision_test():
-    st.toast("🎯 2026년 5월 27일 ~ 30일(시차 고려) 핀셋 테스트를 시작합니다...", icon="🎯")
+    st.toast("🎯 모든 경우의 수를 조합하여 십자포화 테스트를 시작합니다...", icon="🎯")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -347,26 +347,37 @@ def run_precision_test():
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
-
     headers = api_manager._get_common_headers("CTOS4001R")
-    
-    # 🔴 핵심 변경: 시차를 고려해 5/27 ~ 5/30 까지 넓게 잡고, 시장은 "00(전체)"로 던집니다.
-    params = {
-        "CANO": cano,
-        "ACNT_PRDT_CD": acnt_cd,
-        "INQR_STRT_DT": "20260527",
-        "INQR_END_DT": "20260530",
-        "SHTN_PDNO": "",        
-        "ORD_ENX_DVSN_CD": "00"
-    }
-
     url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
-    res = requests.get(url, headers=headers, params=params)
+
+    # 테스트할 조건들의 조합
+    markets = [("00", "전체시장"), ("01", "미국시장")]
+    tickers = [("", "전체종목"), ("O", "리얼티인컴(O)")]
+
+    st.warning("🎯 [자동화 십자포화 테스트 결과 (2026.05.27 ~ 05.30)]")
     
-    st.warning("🎯 [시차 고려 핀셋 테스트 결과]")
-    st.write(f"요청 파라미터: {params}")
-    with st.expander("📦 응답 원본 JSON 보기 (이 안에 데이터가 있어야 합니다!)", expanded=True):
-        st.json(res.json())
+    for market_code, market_name in markets:
+        for ticker_code, ticker_name in tickers:
+            params = {
+                "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
+                "INQR_STRT_DT": "20260527", "INQR_END_DT": "20260530",
+                "SHTN_PDNO": ticker_code,        
+                "ORD_ENX_DVSN_CD": market_code
+            }
+            res = requests.get(url, headers=headers, params=params)
+            res_json = res.json()
+            
+            # 결과 출력
+            title = f"조건: [{market_name}] + [{ticker_name}]"
+            if res_json.get("output1"):
+                st.success(f"✅ {title} -> 데이터 발견!! (아코디언을 열어보세요)")
+            else:
+                st.error(f"❌ {title} -> 조회할 자료 없음 (KIER2620)")
+                
+            with st.expander(f"응답 JSON 보기 ({title})"):
+                st.write(f"요청 파라미터: {params}")
+                st.json(res_json)
+
 
 
 # ==========================================
