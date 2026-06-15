@@ -164,86 +164,120 @@ def build_portfolio(df):
     return active_portfolio
 
 # ==========================================
-# 2. 카카오톡 대화 파서 엔진 
+# 2. 카카오톡 대화 파서 엔진 (다중 클립보드 & 세금 정밀보정 적용)
 # ==========================================
 def parse_kakao_money_events(text):
     events = []
-    def convert_time(y, m, d, ampm, h, mnt):
-        h_int = int(h)
-        if ampm == '오후' and h_int < 12: h_int += 12
-        elif ampm == '오전' and h_int == 12: h_int = 0
-        return f"{y}-{m.zfill(2)}-{d.zfill(2)} {str(h_int).zfill(2)}:{mnt.zfill(2)}:00"
+    
+    # 💡 핵심 1: 데이터 블록의 '시작점'을 기준으로 바로 앞 150글자를 스캔하여 
+    # 흩어져 있는 날짜(MM/DD)와 시간(HH:MM)을 역추적(Look-behind)으로 뽑아냅니다.
+    def get_context_datetime(full_text, match_start):
+        context = full_text[max(0, match_start - 150):match_start]
+        now = datetime.now()
+        y, m, d = now.year, now.month, now.day
+        hh, mm = 0, 0
+        
+        date_m = re.findall(r"(\d{1,2})/(\d{1,2})", context)
+        if date_m:
+            m, d = int(date_m[-1][0]), int(date_m[-1][1])
+            
+        time_m = re.findall(r"(\d{1,2}):(\d{2})", context)
+        if time_m:
+            hh, mm = int(time_m[-1][0]), int(time_m[-1][1])
+            
+        return f"{y}-{m:02d}-{d:02d} {hh:02d}:{mm:02d}:00"
 
-    fx_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
-        r"(?:.*?\n){0,4}?"
+    # 1. 해외주식 배당 (형식에 얽매이지 않고 내용만 낚아챔)
+    div_pat = re.compile(
+        r"(?P<ticker>[A-Za-z0-9]+)(?:/(?P<name>[^\n]*))?\s*\n"
+        r"(?P<curr>[A-Z]{3}|￦|KRW)\s*(?P<amt>[\d,.]+)\s*\n"
+        r"세전배당입금"
+    )
+    for m in div_pat.finditer(text):
+        dt_str = get_context_datetime(text, m.start())
+        gross_amt = float(m.group('amt').replace(',', ''))
+        
+        # 💡 핵심 2: 단순 0.85 곱셈이 아닌, 금융권 표준 세금 공제 로직 적용
+        # (세금 15%를 먼저 반올림하여 확정한 뒤 세전 금액에서 차감)
+        tax = round(gross_amt * 0.15 + 1e-9, 2) 
+        net_amt = round(gross_amt - tax, 2)
+        
+        ticker = m.group('ticker').strip()
+        name = m.group('name').strip() if m.group('name') else ticker
+        curr_raw = m.group('curr').strip()
+        curr = 'KRW' if curr_raw in ['￦', 'KRW'] else curr_raw
+        
+        events.append({
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': curr, 'Category': 'Money', 'Type': 'Dividend',
+            'Ticker': ticker, 'Name': f"배당: {name}", 
+            'Qty': 0.0, 'Price': 0.0, 'Amount_Local': net_amt, 'Amount_KRW': 0.0, 
+            'Note': f"세전 {gross_amt} (세금 {tax} 차감)"
+        })
+
+    # 2. 해외 매매
+    ov_trade_pat = re.compile(
+        r"\*매매구분:\s*(?P<type>매수|매도)\s*\n"
+        r"\*종목명:\s*(?P<ticker>[A-Za-z0-9]+)/?(?P<name>[^\n]*)\n"
+        r"\*체결수량:\s*(?P<qty>[\d,.]+)주\s*\n"
+        r"\*체결단가:\s*(?P<curr>[A-Z]{3})\s*(?P<price>[\d,.]+)"
+    )
+    for m in ov_trade_pat.finditer(text):
+        dt_str = get_context_datetime(text, m.start())
+        t_type = 'Buy' if m.group('type') == '매수' else 'Sell'
+        events.append({
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': m.group('curr'), 'Category': 'Trade', 'Type': t_type,
+            'Ticker': m.group('ticker').strip(), 'Name': m.group('name').strip() or m.group('ticker').strip(), 
+            'Qty': float(m.group('qty').replace(',','')), 'Price': float(m.group('price').replace(',','')),
+            'Amount_Local': 0.0, 'Amount_KRW': 0.0, 'Note': '카톡(해외매매)'
+        })
+
+    # 3. 국내 매매
+    dom_trade_pat = re.compile(
+        r"\*매매구분:.*?(?P<type>매수|매도).*?\n"
+        r"\*종목명:\s*(?P<name>[^\(\n]+)\((?P<ticker>\d+)\)\s*\n"
+        r"\*체결수량:\s*(?P<qty>[\d,.]+)주\s*\n"
+        r"\*체결단가:\s*(?P<price>[\d,.]+)원"
+    )
+    for m in dom_trade_pat.finditer(text):
+        dt_str = get_context_datetime(text, m.start())
+        t_type = 'Buy' if m.group('type') == '매수' else 'Sell'
+        events.append({
+            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': 'KRW', 'Category': 'Trade', 'Type': t_type,
+            'Ticker': m.group('ticker').strip(), 'Name': m.group('name').strip(), 
+            'Qty': float(m.group('qty').replace(',','')), 'Price': float(m.group('price').replace(',','')),
+            'Amount_Local': 0.0, 'Amount_KRW': 0.0, 'Note': '카톡(국내매매)'
+        })
+
+    # 4. 외화 환전
+    fx_pat = re.compile(
         r"외화(?P<fx_type>매수|매도)환전\s*\n"
         r"(?P<sym1>￦|[A-Z]{3})\s*(?P<val1>[\d,.]+)\s*\n"
         r"@(?P<rate>[\d,.]+)\s*\n"
-        r"(?P<sym2>[A-Z]{3}|￦)\s*(?P<val2>[\d,.]+)"
+        r"(?P<sym2>￦|[A-Z]{3})\s*(?P<val2>[\d,.]+)"
     )
-    for match in fx_pattern.finditer(text):
-        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
-        sym1, val1, val2 = match.group('sym1'), float(match.group('val1').replace(',', '')), float(match.group('val2').replace(',', ''))
-        krw_amt, curr, local_amt = (val1, match.group('sym2'), val2) if sym1 == '￦' else (val2, sym1, -val1)
+    for m in fx_pat.finditer(text):
+        dt_str = get_context_datetime(text, m.start())
+        sym1, val1 = m.group('sym1'), float(m.group('val1').replace(',', ''))
+        sym2, val2 = m.group('sym2'), float(m.group('val2').replace(',', ''))
+        rate = float(m.group('rate').replace(',', ''))
+        
+        krw_amt, curr, local_amt = (val1, sym2, val2) if sym1 == '￦' else (val2, sym1, -val1)
+        
         events.append({
             'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': curr, 'Category': 'Money', 'Type': 'FX',
-            'Ticker': '', 'Name': f"외화{match.group('fx_type')}환전", 'Qty': 0.0, 'Price': float(match.group('rate').replace(',', '')),
+            'Ticker': '', 'Name': f"외화{m.group('fx_type')}환전", 'Qty': 0.0, 'Price': rate,
             'Amount_Local': local_amt, 'Amount_KRW': krw_amt, 'Note': ''
         })
 
-    div_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
-        r"(?:.*?\n){0,3}?"
-        r"(?P<ticker>[A-Z0-9]+)[^\n]*\n(?P<curr>[A-Z]{3})\s*(?P<amt>[\d,.]+)\s*\n세전배당입금"
-    )
-    for match in div_pattern.finditer(text):
-        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
-        events.append({
-            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': match.group('curr'), 'Category': 'Money', 'Type': 'Dividend',
-            'Ticker': match.group('ticker'), 'Name': '해외 배당금', 'Qty': 0.0, 'Price': 0.0, 'Amount_Local': round(float(match.group('amt').replace(',', '')) * 0.85, 2), 'Amount_KRW': 0.0, 'Note': ''
-        })
-
-    etf_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
-        r"(?:.*?\n)*?ETF 결산분배금 입금 안내\s*\n\*\s*종목명\s*:\s*(?P<name>[^\n]+)\s*\n(?:.*?\n)*?\*\s*입금액\s*:\s*(?P<amt>[\d,]+)원"
-    )
-    for match in etf_pattern.finditer(text):
-        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
-        amt = float(match.group('amt').replace(',', ''))
-        events.append({
-            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': 'KRW', 'Category': 'Money', 'Type': 'Dividend',
-            'Ticker': 'ETF', 'Name': match.group('name').strip(), 'Qty': 0.0, 'Price': 0.0, 'Amount_Local': amt, 'Amount_KRW': amt, 'Note': ''
-        })
-        
-    trade_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
-        r"(?:.*?\n){0,4}?"
-        r"\*매매구분:(?P<type>매수|매도)\s*\n"
-        r"\*종목명:(?P<ticker>[A-Z0-9]+)[^\n]*\n"
-        r"\*체결수량:(?P<qty>[\d,.]+)주\s*\n"
-        r"\*체결단가:(?P<curr>[A-Z]{3})\s*(?P<price>[\d,.]+)"
-    )
-    for match in trade_pattern.finditer(text):
-        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
-        events.append({
-            'Date': dt_str, 'PK_HASH': '', 'Source': 'Kakao', 'Currency': match.group('curr'), 'Category': 'Trade', 
-            'Type': 'Buy' if match.group('type') == '매수' else 'Sell',
-            'Ticker': match.group('ticker'), 'Name': match.group('ticker'), 
-            'Qty': float(match.group('qty').replace(',', '')), 'Price': float(match.group('price').replace(',', '')),
-            'Amount_Local': 0.0, 'Amount_KRW': 0.0, 'Note': '카톡(HTS매매)'
-        })
-
+    # 5. 미니스탁 소수점 (원화 출납 처리)
     mini_pattern = re.compile(
-        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일\s*(?P<ampm>오전|오후)\s*(?P<hour>\d{1,2}):(?P<minute>\d{1,2}),\s*한국투자증권\s*:.*?\n"
-        r"(?:.*?\n)*?"
         r"-\s*구매\(매수\)\s*체결\s*:\s*\d+건,\s*체결금액\s*(?P<buy_amt>[\d,]+)원\s*\n"
         r"-\s*팔기\(매도\)\s*체결\s*:\s*\d+건,\s*체결금액\s*(?P<sell_amt>[\d,]+)원"
     )
-    for match in mini_pattern.finditer(text):
-        dt_str = convert_time(match.group('year'), match.group('month'), match.group('day'), match.group('ampm'), match.group('hour'), match.group('minute'))
-        buy_amt = float(match.group('buy_amt').replace(',', ''))
-        sell_amt = float(match.group('sell_amt').replace(',', ''))
+    for m in mini_pattern.finditer(text):
+        dt_str = get_context_datetime(text, m.start())
+        buy_amt = float(m.group('buy_amt').replace(',', ''))
+        sell_amt = float(m.group('sell_amt').replace(',', ''))
         
         if buy_amt > 0:
             events.append({
