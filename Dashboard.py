@@ -331,9 +331,9 @@ def audit_realtime_balance():
                 st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
     st.divider()
 
-# 🔴 [최종 교체] 자동화된 십자포화 디버그 테스트
+# 🔴 [최종 교체] 담당자 답변 기반 핀셋 디버그 테스트
 def run_precision_test():
-    st.toast("🎯 모든 경우의 수를 조합하여 십자포화 테스트를 시작합니다...", icon="🎯")
+    st.toast("🎯 담당자 가이드(ERLM_STRT_DT) 적용 십자포화 테스트를 시작합니다...", icon="🎯")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -350,24 +350,28 @@ def run_precision_test():
     headers = api_manager._get_common_headers("CTOS4001R")
     url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
 
-    # 테스트할 조건들의 조합
     markets = [("00", "전체시장"), ("01", "미국시장")]
     tickers = [("", "전체종목"), ("O", "리얼티인컴(O)")]
 
-    st.warning("🎯 [자동화 십자포화 테스트 결과 (2026.05.27 ~ 05.30)]")
+    st.warning("🎯 [담당자 답변 적용 핀셋 테스트 (2026.05.27 ~ 05.30)]")
     
     for market_code, market_name in markets:
         for ticker_code, ticker_name in tickers:
+            # 🔴 핵심 변경: 담당자가 안내한 ERLM_STRT_DT / ERLM_END_DT 적용
+            # (혹시 몰라 기존 문서의 INQR_... 도 같이 보냅니다. 한투 API는 모르는 파라미터는 무시하므로 안전합니다.)
             params = {
-                "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-                "INQR_STRT_DT": "20260527", "INQR_END_DT": "20260530",
+                "CANO": cano, 
+                "ACNT_PRDT_CD": acnt_cd,
+                "INQR_STRT_DT": "20260527", 
+                "INQR_END_DT": "20260530",
+                "ERLM_STRT_DT": "20260527", 
+                "ERLM_END_DT": "20260530",
                 "SHTN_PDNO": ticker_code,        
                 "ORD_ENX_DVSN_CD": market_code
             }
             res = requests.get(url, headers=headers, params=params)
             res_json = res.json()
             
-            # 결과 출력
             title = f"조건: [{market_name}] + [{ticker_name}]"
             if res_json.get("output1"):
                 st.success(f"✅ {title} -> 데이터 발견!! (아코디언을 열어보세요)")
@@ -377,6 +381,7 @@ def run_precision_test():
             with st.expander(f"응답 JSON 보기 ({title})"):
                 st.write(f"요청 파라미터: {params}")
                 st.json(res_json)
+
 
 
 
