@@ -370,8 +370,13 @@ import pandas as pd
 import streamlit as st
 
 
+import requests
+import pandas as pd
+import streamlit as st
+
+
 def run_precision_test():
-    st.toast("🎯 CTOS4001R 포렌식 검증 테스트를 시작합니다...", icon="🎯")
+    st.toast("🌐 해외 원장/매매내역 전체 탐색 테스트를 시작합니다...", icon="🌐")
 
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
@@ -388,71 +393,12 @@ def run_precision_test():
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
-    headers = api_manager._get_common_headers("CTOS4001R")
-    url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+
+    base_url = api_manager.base_url
+    session = requests.Session()
 
     # --------------------------------------------------
-    # 1) 테스트 케이스 구성
-    # --------------------------------------------------
-    test_cases = []
-
-    date_sets = [
-        ("20260527", "20260530", "5/27~5/30"),
-        ("20260529", "20260529", "5/29 단일"),
-    ]
-
-    markets = [
-        ("00", "전체시장"),
-        ("01", "미국시장"),
-    ]
-
-    tickers = [
-        ("", "전체종목"),
-        ("O", "리얼티인컴(O)"),
-    ]
-
-    # A. ERLM 버전
-    for start_dt, end_dt, date_label in date_sets:
-        for market_code, market_name in markets:
-            for ticker_code, ticker_name in tickers:
-                params = {
-                    "CANO": cano,
-                    "ACNT_PRDT_CD": acnt_cd,
-                    "ERLM_STRT_DT": start_dt,
-                    "ERLM_END_DT": end_dt,
-                    "SHTN_PDNO": ticker_code,
-                    "ORD_ENX_DVSN_CD": market_code
-                }
-                test_cases.append({
-                    "mode": "ERLM",
-                    "date_label": date_label,
-                    "market_name": market_name,
-                    "ticker_name": ticker_name,
-                    "params": params
-                })
-
-    # B. INQR 버전 (문서/담당자 답변과 실제 동작 비교용)
-    for start_dt, end_dt, date_label in date_sets:
-        for market_code, market_name in markets:
-            for ticker_code, ticker_name in tickers:
-                params = {
-                    "CANO": cano,
-                    "ACNT_PRDT_CD": acnt_cd,
-                    "INQR_STRT_DT": start_dt,
-                    "INQR_END_DT": end_dt,
-                    "SHTN_PDNO": ticker_code,
-                    "ORD_ENX_DVSN_CD": market_code
-                }
-                test_cases.append({
-                    "mode": "INQR",
-                    "date_label": date_label,
-                    "market_name": market_name,
-                    "ticker_name": ticker_name,
-                    "params": params
-                })
-
-    # --------------------------------------------------
-    # 2) 헤더 마스킹용 함수
+    # 공통 유틸
     # --------------------------------------------------
     def mask_value(v, head=6, tail=4):
         if not v:
@@ -463,164 +409,299 @@ def run_precision_test():
         return v[:head] + "*" * (len(v) - head - tail) + v[-tail:]
 
     def summarize_headers(h):
-        # 민감값은 마스킹
         return {
-            "content-type": h.get("content-type"),
             "authorization": mask_value(h.get("authorization", "")),
             "appkey": mask_value(h.get("appkey", "")),
             "appsecret": mask_value(h.get("appsecret", "")),
             "tr_id": h.get("tr_id"),
             "custtype": h.get("custtype"),
+            "content-type": h.get("content-type"),
         }
 
-    # --------------------------------------------------
-    # 3) 실행
-    # --------------------------------------------------
-    st.warning("🎯 [CTOS4001R 포렌식 검증 결과]")
-    st.caption("ERLM / INQR 두 방식 모두, 날짜·시장·종목 조합을 비교합니다.")
-
-    results = []
-
-    session = requests.Session()
-
-    for i, case in enumerate(test_cases, 1):
-        mode = case["mode"]
-        date_label = case["date_label"]
-        market_name = case["market_name"]
-        ticker_name = case["ticker_name"]
-        params = case["params"]
-
-        title = f"{i:02d}. [{mode}] [{date_label}] [{market_name}] + [{ticker_name}]"
+    def call_api(tr_id, path, params, label):
+        headers = api_manager._get_common_headers(tr_id)
+        url = f"{base_url}{path}"
 
         try:
             req = requests.Request("GET", url, headers=headers, params=params)
             prepared = session.prepare_request(req)
-
             res = session.send(prepared, timeout=20)
-            status_code = res.status_code
 
             try:
-                res_json = res.json()
+                data = res.json()
             except Exception:
-                res_json = {"_raw_text": res.text}
+                data = {"_raw_text": res.text}
 
-            output1 = res_json.get("output1", None)
-            output_count = len(output1) if isinstance(output1, list) else None
-            rt_cd = res_json.get("rt_cd")
-            msg_cd = res_json.get("msg_cd")
-            msg1 = res_json.get("msg1")
-            ctx_fk = res_json.get("ctx_area_fk100")
-            ctx_nk = res_json.get("ctx_area_nk100")
-
-            success = bool(isinstance(output1, list) and len(output1) > 0)
-
-            results.append({
-                "mode": mode,
-                "date": date_label,
-                "market": market_name,
-                "ticker": ticker_name,
-                "http_status": status_code,
-                "rt_cd": rt_cd,
-                "msg_cd": msg_cd,
-                "msg1": msg1,
-                "output1_count": output_count,
-                "ctx_area_fk100": ctx_fk,
-                "ctx_area_nk100": ctx_nk,
+            return {
+                "label": label,
+                "tr_id": tr_id,
+                "url": url,
                 "prepared_url": prepared.url,
-                "success": success,
-            })
-
-            if success:
-                st.success(
-                    f"✅ {title} -> 데이터 발견! "
-                    f"(output1_count={output_count}, rt_cd={rt_cd}, msg_cd={msg_cd})"
-                )
-            else:
-                st.error(
-                    f"❌ {title} -> 데이터 없음 | "
-                    f"http={status_code} / rt_cd={rt_cd} / msg_cd={msg_cd} / msg1={msg1}"
-                )
-
-            with st.expander(f"응답 상세 보기 {title}"):
-                st.write("**Endpoint**")
-                st.code(url)
-
-                st.write("**Prepared URL (실제 전송 URL)**")
-                st.code(prepared.url)
-
-                st.write("**Header Summary (민감정보 마스킹)**")
-                st.json(summarize_headers(headers))
-
-                st.write("**Params**")
-                st.json(params)
-
-                st.write("**Response JSON**")
-                st.json(res_json)
-
+                "headers_summary": summarize_headers(headers),
+                "params": params,
+                "status_code": res.status_code,
+                "json": data,
+            }
         except Exception as e:
-            results.append({
-                "mode": mode,
-                "date": date_label,
-                "market": market_name,
-                "ticker": ticker_name,
-                "http_status": None,
-                "rt_cd": None,
-                "msg_cd": "EXCEPTION",
-                "msg1": str(e),
-                "output1_count": None,
-                "ctx_area_fk100": None,
-                "ctx_area_nk100": None,
+            return {
+                "label": label,
+                "tr_id": tr_id,
+                "url": url,
                 "prepared_url": None,
-                "success": False,
-            })
-            st.error(f"❌ {title} -> 요청 실패: {e}")
+                "headers_summary": summarize_headers(headers),
+                "params": params,
+                "status_code": None,
+                "json": {"rt_cd": None, "msg_cd": "EXCEPTION", "msg1": str(e)},
+            }
 
     # --------------------------------------------------
-    # 4) 결과 요약표
+    # 1) 주간/야간 원장 구분 확인
     # --------------------------------------------------
-    if results:
-        df = pd.DataFrame(results)
+    st.subheader("1) 주간/야간 원장 구분 확인")
+    dayornight_params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_cd
+    }
 
-        st.subheader("📋 요약 테이블")
-        st.dataframe(
-            df[
-                [
-                    "mode", "date", "market", "ticker",
-                    "http_status", "rt_cd", "msg_cd", "msg1",
-                    "output1_count", "success"
-                ]
-            ],
-            use_container_width=True
+    dayornight_result = call_api(
+        tr_id="JTTT3010R",  # 문서/계정별 차이 있을 수 있음. 실패해도 참고용으로 남김
+        path="/uapi/overseas-stock/v1/trading/dayornight",
+        params=dayornight_params,
+        label="주간/야간 원장 구분 조회"
+    )
+
+    day_json = dayornight_result["json"]
+    psbl_yn = None
+
+    # 응답 구조가 계정/버전에 따라 조금 다를 수 있어 후보들을 폭넓게 확인
+    if isinstance(day_json, dict):
+        if isinstance(day_json.get("output"), dict):
+            psbl_yn = day_json["output"].get("PSBL_YN") or day_json["output"].get("psbl_yn")
+        if not psbl_yn and isinstance(day_json.get("output1"), dict):
+            psbl_yn = day_json["output1"].get("PSBL_YN") or day_json["output1"].get("psbl_yn")
+
+    if day_json.get("rt_cd") == "0":
+        st.success(f"주간/야간 원장 구분 조회 응답 수신 (PSBL_YN={psbl_yn})")
+    else:
+        st.warning(
+            f"주간/야간 원장 구분 조회 실패/미확인 | "
+            f"rt_cd={day_json.get('rt_cd')} / msg_cd={day_json.get('msg_cd')} / msg1={day_json.get('msg1')}"
         )
 
-        # 실패 케이스만 별도 정리
-        fail_df = df[df["success"] == False].copy()
+    with st.expander("응답 상세 보기 - 주간/야간 원장 구분 조회", expanded=False):
+        st.write("**Prepared URL**")
+        st.code(dayornight_result["prepared_url"] or "(요청 실패)")
+        st.write("**Headers**")
+        st.json(dayornight_result["headers_summary"])
+        st.write("**Params**")
+        st.json(dayornight_result["params"])
+        st.write("**Response JSON**")
+        st.json(day_json)
 
-        st.subheader("🧾 Q&A 첨부용 실패 요약")
-        if not fail_df.empty:
-            for _, row in fail_df.iterrows():
-                st.code(
-                    f"[{row['mode']}] {row['date']} / {row['market']} / {row['ticker']} "
-                    f"=> http={row['http_status']}, rt_cd={row['rt_cd']}, "
-                    f"msg_cd={row['msg_cd']}, msg1={row['msg1']}"
-                )
+    # --------------------------------------------------
+    # 2) 해외 기간별 거래내역 전체 탐색
+    # --------------------------------------------------
+    st.subheader("2) 해외 기간별 거래내역 전체 탐색")
 
-        # 참고: ctx_area_fk100 패턴도 보여주기
-        st.subheader("🔍 서버 컨텍스트 키(ctx_area_fk100) 비교")
-        ctx_view = df[
-            ["mode", "date", "market", "ticker", "ctx_area_fk100", "prepared_url"]
-        ].copy()
-        st.dataframe(ctx_view, use_container_width=True)
+    # 너무 핀셋 말고 넓게 본다.
+    # 최근 체결이 5월 말이므로 5월 전체 + 6월 일부까지 포함
+    date_ranges = [
+        ("20260501", "20260531", "2026-05 전체"),
+        ("20260520", "20260610", "2026-05-20 ~ 2026-06-10"),
+    ]
 
-        # 최종 결론 메시지
-        if df["success"].any():
-            st.success("최소 1개 이상의 조합에서 데이터가 조회되었습니다. 해당 조합 기준으로 본 엔진에 반영하면 됩니다.")
+    market_cases = [
+        ("00", "전체시장"),
+        ("01", "미국시장"),
+    ]
+
+    # 전체종목 위주 + 대표 종목 하나
+    ticker_cases = [
+        ("", "전체종목"),
+        ("O", "리얼티인컴(O)"),
+    ]
+
+    # ERLM / INQR 둘 다 비교
+    mode_cases = ["ERLM", "INQR"]
+
+    ledger_results = []
+
+    for mode in mode_cases:
+        for start_dt, end_dt, date_label in date_ranges:
+            for market_code, market_name in market_cases:
+                for ticker_code, ticker_name in ticker_cases:
+                    params = {
+                        "CANO": cano,
+                        "ACNT_PRDT_CD": acnt_cd,
+                        "SHTN_PDNO": ticker_code,
+                        "ORD_ENX_DVSN_CD": market_code,
+                    }
+
+                    if mode == "ERLM":
+                        params["ERLM_STRT_DT"] = start_dt
+                        params["ERLM_END_DT"] = end_dt
+                    else:
+                        params["INQR_STRT_DT"] = start_dt
+                        params["INQR_END_DT"] = end_dt
+
+                    label = f"{mode} | {date_label} | {market_name} | {ticker_name}"
+
+                    result = call_api(
+                        tr_id="CTOS4001R",
+                        path="/uapi/overseas-stock/v1/trading/inquire-period-trans",
+                        params=params,
+                        label=label
+                    )
+
+                    j = result["json"]
+                    output1 = j.get("output1")
+                    output_count = len(output1) if isinstance(output1, list) else None
+                    success = bool(isinstance(output1, list) and len(output1) > 0)
+
+                    ledger_results.append({
+                        "mode": mode,
+                        "date": date_label,
+                        "market": market_name,
+                        "ticker": ticker_name,
+                        "http_status": result["status_code"],
+                        "rt_cd": j.get("rt_cd"),
+                        "msg_cd": j.get("msg_cd"),
+                        "msg1": j.get("msg1"),
+                        "output1_count": output_count,
+                        "ctx_area_fk100": j.get("ctx_area_fk100"),
+                        "success": success,
+                        "prepared_url": result["prepared_url"],
+                        "full_result": result,
+                    })
+
+    # 결과 표시
+    if not ledger_results:
+        st.error("거래내역 탐색 결과가 없습니다.")
+        return
+
+    df = pd.DataFrame(ledger_results)
+
+    any_success = df["success"].any()
+
+    if any_success:
+        st.success("적어도 하나의 조합에서 해외 거래내역이 조회되었습니다.")
+    else:
+        st.error("모든 조합에서 거래내역이 조회되지 않았습니다. (output1 전부 빈 배열)")
+
+    st.dataframe(
+        df[[
+            "mode", "date", "market", "ticker",
+            "http_status", "rt_cd", "msg_cd", "msg1",
+            "output1_count", "success"
+        ]],
+        use_container_width=True
+    )
+
+    # 성공 케이스 우선 상세 출력
+    st.subheader("3) 상세 응답 보기")
+    for row in ledger_results:
+        title = (
+            f"{row['mode']} | {row['date']} | {row['market']} | {row['ticker']} | "
+            f"count={row['output1_count']}"
+        )
+
+        if row["success"]:
+            prefix = "✅"
         else:
-            st.error(
-                "모든 ERLM/INQR 조합에서 output1이 비었습니다. "
-                "이 경우 다음 Q&A에는 'ERLM 적용 후에도 동일' + "
-                "'실제 전송 URL/헤더/TR_ID/응답 JSON'을 첨부하는 방식으로 가는 게 좋습니다."
-            )
+            prefix = "❌"
+
+        with st.expander(f"{prefix} {title}", expanded=False):
+            result = row["full_result"]
+            st.write("**Prepared URL**")
+            st.code(result["prepared_url"] or "(요청 실패)")
+            st.write("**Headers**")
+            st.json(result["headers_summary"])
+            st.write("**Params**")
+            st.json(result["params"])
+            st.write("**Response JSON**")
+            st.json(result["json"])
+
+    # --------------------------------------------------
+    # 3) 참고용: 체결기준현재잔고 계열 확인
+    # --------------------------------------------------
+    st.subheader("4) 참고용 잔고/원장 계열 확인")
+
+    balance_candidates = [
+        ("JTTT3012R", "주간 원장용 후보 TR"),
+        ("TTTS3012R", "야간 원장용 후보 TR"),
+    ]
+
+    balance_rows = []
+
+    for tr_id, tr_name in balance_candidates:
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_cd,
+            "OVRS_EXCG_CD": "NASD",   # 필요 시 AMEX/NYSE 등으로 바꿔볼 수 있음
+            "TR_CRCY_CD": "USD",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+
+        result = call_api(
+            tr_id=tr_id,
+            path="/uapi/overseas-stock/v1/trading/inquire-balance",
+            params=params,
+            label=tr_name
+        )
+
+        j = result["json"]
+
+        output1 = j.get("output1")
+        output_count = len(output1) if isinstance(output1, list) else None
+
+        balance_rows.append({
+            "tr_id": tr_id,
+            "name": tr_name,
+            "http_status": result["status_code"],
+            "rt_cd": j.get("rt_cd"),
+            "msg_cd": j.get("msg_cd"),
+            "msg1": j.get("msg1"),
+            "output1_count": output_count,
+            "prepared_url": result["prepared_url"],
+            "full_result": result,
+        })
+
+    bal_df = pd.DataFrame(balance_rows)
+    st.dataframe(
+        bal_df[["tr_id", "name", "http_status", "rt_cd", "msg_cd", "msg1", "output1_count"]],
+        use_container_width=True
+    )
+
+    for row in balance_rows:
+        with st.expander(f"잔고 TR 상세 보기 - {row['tr_id']} / {row['name']}", expanded=False):
+            result = row["full_result"]
+            st.write("**Prepared URL**")
+            st.code(result["prepared_url"] or "(요청 실패)")
+            st.write("**Headers**")
+            st.json(result["headers_summary"])
+            st.write("**Params**")
+            st.json(result["params"])
+            st.write("**Response JSON**")
+            st.json(result["json"])
+
+    # --------------------------------------------------
+    # 최종 해석 가이드
+    # --------------------------------------------------
+    st.subheader("5) 해석 가이드")
+
+    if any_success:
+        st.info(
+            "해외 거래내역이 최소 1개 조합에서 조회되었다면, "
+            "이제 그 조합(ERLM/INQR, 시장코드, 종목코드, 날짜 범위)을 기준으로 "
+            "실제 원장 동기화 함수에 반영하면 됩니다."
+        )
+    else:
+        st.warning(
+            "ERLM/INQR 넓은 범위 탐색에서도 전부 KIER2620이면, "
+            "다음 문의에서는 'CTOS4001R가 이 계좌의 해외 체결 원장을 실제로 조회하는 API가 맞는지'를 "
+            "중심으로 물어보는 것이 맞습니다."
+        )
 
 
 
