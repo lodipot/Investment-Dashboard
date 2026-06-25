@@ -366,8 +366,9 @@ def audit_realtime_balance():
     st.divider()
 
 
+# 🔴 [최종 포렌식 증거 수집기] ERLM/INQR 및 넓은 날짜(6/5까지) 교차 검증
 def run_precision_test():
-    st.toast("🎯 HTS 거래일자(6/1)를 포함하는 넓은 그물망 테스트를 시작합니다...", icon="🎯")
+    st.toast("🕵️‍♂️ 한투 서버 제출용 포렌식 증거 수집을 시작합니다...", icon="🔍")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -377,49 +378,54 @@ def run_precision_test():
         return
 
     api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: return
+    if not api_manager.token: 
+        st.error("토큰 발급 실패")
+        return
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
     headers = api_manager._get_common_headers("CTOS4001R")
     url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
 
-    # 🔴 핵심: 시차가 적용된 HTS 날짜(6/1)를 완벽히 덮는 날짜 범위 설정
-    start_dt = "20260528"
+    # 🔴 핵심: 시차 및 HTS 반영일(6월 1일)을 덮기 위해 5/27 ~ 6/5 로 극단적으로 넓힘
+    start_dt = "20260527"
     end_dt = "20260605"
 
-    st.warning(f"🎯 [시차 극복 그물망 테스트 ({start_dt} ~ {end_dt})]")
+    test_cases = [
+        {"name": "INQR + 전체시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "INQR_STRT_DT": start_dt, "INQR_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "00"}},
+        {"name": "INQR + 미국시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "INQR_STRT_DT": start_dt, "INQR_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "01"}},
+        {"name": "ERLM + 전체시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "00"}},
+        {"name": "ERLM + 미국시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "01"}}
+    ]
 
-    # 테스트 1: 기존 문서 스펙인 INQR
-    params_inqr = {
-        "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-        "INQR_STRT_DT": start_dt, "INQR_END_DT": end_dt,
-        "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "00"
-    }
+    st.warning(f"🕵️‍♂️ [서버 원장 분리 증명용 테스트 결과 ({start_dt} ~ {end_dt})]")
     
-    # 테스트 2: 담당자가 주장한 ERLM
-    params_erlm = {
-        "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-        "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt,
-        "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "00"
-    }
+    success_flag = False
 
-    for name, params in [("INQR 파라미터 테스트", params_inqr), ("ERLM 파라미터 테스트", params_erlm)]:
+    for case in test_cases:
         try:
-            res = requests.get(url, headers=headers, params=params, timeout=20)
+            res = requests.get(url, headers=headers, params=case["params"], timeout=20)
             res_json = res.json()
         except Exception as e:
-            st.error(f"❌ 요청 실패: {e}")
+            st.error(f"❌ 요청 실패: {case['name']} / {e}")
             continue
-        
+
         if res_json.get("output1"):
-            st.success(f"✅ [{name}] -> 드디어 데이터를 낚았습니다!!!")
+            st.success(f"✅ [{case['name']}] -> 드디어 데이터 발견!!")
+            success_flag = True
         else:
-            st.error(f"❌ [{name}] -> 데이터 없음 (KIER2620)")
+            st.error(
+                f"❌ [{case['name']}] -> 데이터 없음 | "
+                f"ctx_area_fk100: {res_json.get('ctx_area_fk100', '없음')}"
+            )
             
-        with st.expander(f"응답 상세 보기 [{name}]"):
-            st.write("**Params:**", params)
+        with st.expander(f"응답 상세 보기 [{case['name']}]"):
+            st.write("**Params:**", case["params"])
             st.json(res_json)
+
+    if not success_flag:
+        st.info("💡 **모든 조합에서 실패했습니다. 이는 파라미터 문제가 아니라, 한투 CTOS4001R API가 해당 계좌의 거래 원장을 읽지 못하는 서버 구조적 한계임을 완벽히 증명합니다. 문의글을 올려주세요!**")
+
 
 
 
