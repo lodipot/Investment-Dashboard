@@ -365,9 +365,9 @@ def audit_realtime_balance():
                 st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
     st.divider()
 
-# 🔴 [최종 진검승부] 담당자가 확언한 ERLM 단일 파라미터 테스트
+# 🔴 [최종 검증] INQR 삭제 및 ERLM 전용 4콤보 십자포화 테스트
 def run_precision_test():
-    st.toast("🎯 한투 잠수함 패치 검증 테스트를 시작합니다...", icon="🎯")
+    st.toast("🎯 CTOS4001R ERLM 파라미터 최종 검증 테스트를 시작합니다...", icon="🎯")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -377,37 +377,58 @@ def run_precision_test():
         return
 
     api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: return
+    if not api_manager.token: 
+        st.error("토큰 발급 실패")
+        return
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
     headers = api_manager._get_common_headers("CTOS4001R")
     url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
 
-    # 이전처럼 십자포화 할 필요 없이 전체시장/전체종목 한 방만 찌릅니다.
-    params = {
-        "CANO": cano, 
-        "ACNT_PRDT_CD": acnt_cd,
-        # 🔴 핵심: INQR은 완전히 삭제하고 담당자가 말한 ERLM만 전송
-        "ERLM_STRT_DT": "20260527", 
-        "ERLM_END_DT": "20260530",
-        "SHTN_PDNO": "",        
-        "ORD_ENX_DVSN_CD": "00"
-    }
+    markets = [("00", "전체시장"), ("01", "미국시장")]
+    tickers = [("", "전체종목"), ("O", "리얼티인컴(O)")]
+
+    st.warning("🎯 [CTOS4001R + ERLM_STRT_DT 단일 적용 최종 검증 결과]")
     
-    res = requests.get(url, headers=headers, params=params)
-    res_json = res.json()
-    
-    st.warning("🎯 [담당자 확언 ERLM 단일 적용 테스트 (2026.05.27 ~ 05.30)]")
-    
-    if res_json.get("output1"):
-        st.success(f"✅ 드디어 데이터가 터졌습니다!! 한투가 고친 게 맞습니다!")
-    else:
-        st.error(f"❌ 여전히 조회할 자료 없음 (KIER2620) - 핑계였음이 입증됨")
-        
-    with st.expander(f"응답 JSON 원본 보기", expanded=True):
-        st.write(f"요청 파라미터: {params}")
-        st.json(res_json)
+    for market_code, market_name in markets:
+        for ticker_code, ticker_name in tickers:
+            # 🔴 핵심: INQR은 완전히 흔적도 없이 지우고 ERLM만 남김
+            params = {
+                "CANO": cano,
+                "ACNT_PRDT_CD": acnt_cd,
+                "ERLM_STRT_DT": "20260527",
+                "ERLM_END_DT": "20260530",
+                "SHTN_PDNO": ticker_code,
+                "ORD_ENX_DVSN_CD": market_code
+            }
+
+            try:
+                res = requests.get(url, headers=headers, params=params, timeout=20)
+                res_json = res.json()
+            except Exception as e:
+                st.error(f"❌ 요청 실패: [{market_name}] + [{ticker_name}] / {e}")
+                continue
+
+            title = f"[{market_name}] + [{ticker_name}]"
+            
+            if res_json.get("output1"):
+                st.success(f"✅ {title} -> 데이터 발견!! (한투 담당자 말이 맞았음)")
+            else:
+                st.error(
+                    f"❌ {title} -> 데이터 없음 | "
+                    f"rt_cd={res_json.get('rt_cd')} / "
+                    f"msg_cd={res_json.get('msg_cd')} / "
+                    f"msg1={res_json.get('msg1')}"
+                )
+                
+            # 증거 수집용 상세 출력
+            with st.expander(f"응답 상세 보기 {title}"):
+                st.write("**URL:**", url)
+                st.write("**TR_ID:**", headers.get("tr_id"))
+                st.write("**Params:**", params)
+                st.json(res_json)
+
 
 
 
