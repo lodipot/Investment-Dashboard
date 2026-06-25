@@ -365,9 +365,14 @@ def audit_realtime_balance():
                 st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
     st.divider()
 
-# 🔴 [최종 검증] INQR 삭제 및 ERLM 전용 4콤보 십자포화 테스트
+import requests
+import pandas as pd
+import streamlit as st
+
+
 def run_precision_test():
-    st.toast("🎯 CTOS4001R ERLM 파라미터 최종 검증 테스트를 시작합니다...", icon="🎯")
+    st.toast("🎯 CTOS4001R 포렌식 검증 테스트를 시작합니다...", icon="🎯")
+
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -377,7 +382,7 @@ def run_precision_test():
         return
 
     api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: 
+    if not api_manager.token:
         st.error("토큰 발급 실패")
         return
 
@@ -386,48 +391,236 @@ def run_precision_test():
     headers = api_manager._get_common_headers("CTOS4001R")
     url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
 
-    markets = [("00", "전체시장"), ("01", "미국시장")]
-    tickers = [("", "전체종목"), ("O", "리얼티인컴(O)")]
+    # --------------------------------------------------
+    # 1) 테스트 케이스 구성
+    # --------------------------------------------------
+    test_cases = []
 
-    st.warning("🎯 [CTOS4001R + ERLM_STRT_DT 단일 적용 최종 검증 결과]")
-    
-    for market_code, market_name in markets:
-        for ticker_code, ticker_name in tickers:
-            # 🔴 핵심: INQR은 완전히 흔적도 없이 지우고 ERLM만 남김
-            params = {
-                "CANO": cano,
-                "ACNT_PRDT_CD": acnt_cd,
-                "ERLM_STRT_DT": "20260527",
-                "ERLM_END_DT": "20260530",
-                "SHTN_PDNO": ticker_code,
-                "ORD_ENX_DVSN_CD": market_code
-            }
+    date_sets = [
+        ("20260527", "20260530", "5/27~5/30"),
+        ("20260529", "20260529", "5/29 단일"),
+    ]
+
+    markets = [
+        ("00", "전체시장"),
+        ("01", "미국시장"),
+    ]
+
+    tickers = [
+        ("", "전체종목"),
+        ("O", "리얼티인컴(O)"),
+    ]
+
+    # A. ERLM 버전
+    for start_dt, end_dt, date_label in date_sets:
+        for market_code, market_name in markets:
+            for ticker_code, ticker_name in tickers:
+                params = {
+                    "CANO": cano,
+                    "ACNT_PRDT_CD": acnt_cd,
+                    "ERLM_STRT_DT": start_dt,
+                    "ERLM_END_DT": end_dt,
+                    "SHTN_PDNO": ticker_code,
+                    "ORD_ENX_DVSN_CD": market_code
+                }
+                test_cases.append({
+                    "mode": "ERLM",
+                    "date_label": date_label,
+                    "market_name": market_name,
+                    "ticker_name": ticker_name,
+                    "params": params
+                })
+
+    # B. INQR 버전 (문서/담당자 답변과 실제 동작 비교용)
+    for start_dt, end_dt, date_label in date_sets:
+        for market_code, market_name in markets:
+            for ticker_code, ticker_name in tickers:
+                params = {
+                    "CANO": cano,
+                    "ACNT_PRDT_CD": acnt_cd,
+                    "INQR_STRT_DT": start_dt,
+                    "INQR_END_DT": end_dt,
+                    "SHTN_PDNO": ticker_code,
+                    "ORD_ENX_DVSN_CD": market_code
+                }
+                test_cases.append({
+                    "mode": "INQR",
+                    "date_label": date_label,
+                    "market_name": market_name,
+                    "ticker_name": ticker_name,
+                    "params": params
+                })
+
+    # --------------------------------------------------
+    # 2) 헤더 마스킹용 함수
+    # --------------------------------------------------
+    def mask_value(v, head=6, tail=4):
+        if not v:
+            return ""
+        v = str(v)
+        if len(v) <= head + tail:
+            return "*" * len(v)
+        return v[:head] + "*" * (len(v) - head - tail) + v[-tail:]
+
+    def summarize_headers(h):
+        # 민감값은 마스킹
+        return {
+            "content-type": h.get("content-type"),
+            "authorization": mask_value(h.get("authorization", "")),
+            "appkey": mask_value(h.get("appkey", "")),
+            "appsecret": mask_value(h.get("appsecret", "")),
+            "tr_id": h.get("tr_id"),
+            "custtype": h.get("custtype"),
+        }
+
+    # --------------------------------------------------
+    # 3) 실행
+    # --------------------------------------------------
+    st.warning("🎯 [CTOS4001R 포렌식 검증 결과]")
+    st.caption("ERLM / INQR 두 방식 모두, 날짜·시장·종목 조합을 비교합니다.")
+
+    results = []
+
+    session = requests.Session()
+
+    for i, case in enumerate(test_cases, 1):
+        mode = case["mode"]
+        date_label = case["date_label"]
+        market_name = case["market_name"]
+        ticker_name = case["ticker_name"]
+        params = case["params"]
+
+        title = f"{i:02d}. [{mode}] [{date_label}] [{market_name}] + [{ticker_name}]"
+
+        try:
+            req = requests.Request("GET", url, headers=headers, params=params)
+            prepared = session.prepare_request(req)
+
+            res = session.send(prepared, timeout=20)
+            status_code = res.status_code
 
             try:
-                res = requests.get(url, headers=headers, params=params, timeout=20)
                 res_json = res.json()
-            except Exception as e:
-                st.error(f"❌ 요청 실패: [{market_name}] + [{ticker_name}] / {e}")
-                continue
+            except Exception:
+                res_json = {"_raw_text": res.text}
 
-            title = f"[{market_name}] + [{ticker_name}]"
-            
-            if res_json.get("output1"):
-                st.success(f"✅ {title} -> 데이터 발견!! (한투 담당자 말이 맞았음)")
+            output1 = res_json.get("output1", None)
+            output_count = len(output1) if isinstance(output1, list) else None
+            rt_cd = res_json.get("rt_cd")
+            msg_cd = res_json.get("msg_cd")
+            msg1 = res_json.get("msg1")
+            ctx_fk = res_json.get("ctx_area_fk100")
+            ctx_nk = res_json.get("ctx_area_nk100")
+
+            success = bool(isinstance(output1, list) and len(output1) > 0)
+
+            results.append({
+                "mode": mode,
+                "date": date_label,
+                "market": market_name,
+                "ticker": ticker_name,
+                "http_status": status_code,
+                "rt_cd": rt_cd,
+                "msg_cd": msg_cd,
+                "msg1": msg1,
+                "output1_count": output_count,
+                "ctx_area_fk100": ctx_fk,
+                "ctx_area_nk100": ctx_nk,
+                "prepared_url": prepared.url,
+                "success": success,
+            })
+
+            if success:
+                st.success(
+                    f"✅ {title} -> 데이터 발견! "
+                    f"(output1_count={output_count}, rt_cd={rt_cd}, msg_cd={msg_cd})"
+                )
             else:
                 st.error(
                     f"❌ {title} -> 데이터 없음 | "
-                    f"rt_cd={res_json.get('rt_cd')} / "
-                    f"msg_cd={res_json.get('msg_cd')} / "
-                    f"msg1={res_json.get('msg1')}"
+                    f"http={status_code} / rt_cd={rt_cd} / msg_cd={msg_cd} / msg1={msg1}"
                 )
-                
-            # 증거 수집용 상세 출력
+
             with st.expander(f"응답 상세 보기 {title}"):
-                st.write("**URL:**", url)
-                st.write("**TR_ID:**", headers.get("tr_id"))
-                st.write("**Params:**", params)
+                st.write("**Endpoint**")
+                st.code(url)
+
+                st.write("**Prepared URL (실제 전송 URL)**")
+                st.code(prepared.url)
+
+                st.write("**Header Summary (민감정보 마스킹)**")
+                st.json(summarize_headers(headers))
+
+                st.write("**Params**")
+                st.json(params)
+
+                st.write("**Response JSON**")
                 st.json(res_json)
+
+        except Exception as e:
+            results.append({
+                "mode": mode,
+                "date": date_label,
+                "market": market_name,
+                "ticker": ticker_name,
+                "http_status": None,
+                "rt_cd": None,
+                "msg_cd": "EXCEPTION",
+                "msg1": str(e),
+                "output1_count": None,
+                "ctx_area_fk100": None,
+                "ctx_area_nk100": None,
+                "prepared_url": None,
+                "success": False,
+            })
+            st.error(f"❌ {title} -> 요청 실패: {e}")
+
+    # --------------------------------------------------
+    # 4) 결과 요약표
+    # --------------------------------------------------
+    if results:
+        df = pd.DataFrame(results)
+
+        st.subheader("📋 요약 테이블")
+        st.dataframe(
+            df[
+                [
+                    "mode", "date", "market", "ticker",
+                    "http_status", "rt_cd", "msg_cd", "msg1",
+                    "output1_count", "success"
+                ]
+            ],
+            use_container_width=True
+        )
+
+        # 실패 케이스만 별도 정리
+        fail_df = df[df["success"] == False].copy()
+
+        st.subheader("🧾 Q&A 첨부용 실패 요약")
+        if not fail_df.empty:
+            for _, row in fail_df.iterrows():
+                st.code(
+                    f"[{row['mode']}] {row['date']} / {row['market']} / {row['ticker']} "
+                    f"=> http={row['http_status']}, rt_cd={row['rt_cd']}, "
+                    f"msg_cd={row['msg_cd']}, msg1={row['msg1']}"
+                )
+
+        # 참고: ctx_area_fk100 패턴도 보여주기
+        st.subheader("🔍 서버 컨텍스트 키(ctx_area_fk100) 비교")
+        ctx_view = df[
+            ["mode", "date", "market", "ticker", "ctx_area_fk100", "prepared_url"]
+        ].copy()
+        st.dataframe(ctx_view, use_container_width=True)
+
+        # 최종 결론 메시지
+        if df["success"].any():
+            st.success("최소 1개 이상의 조합에서 데이터가 조회되었습니다. 해당 조합 기준으로 본 엔진에 반영하면 됩니다.")
+        else:
+            st.error(
+                "모든 ERLM/INQR 조합에서 output1이 비었습니다. "
+                "이 경우 다음 Q&A에는 'ERLM 적용 후에도 동일' + "
+                "'실제 전송 URL/헤더/TR_ID/응답 JSON'을 첨부하는 방식으로 가는 게 좋습니다."
+            )
 
 
 
