@@ -295,8 +295,17 @@ def parse_kakao_money_events(text):
 # ==========================================
 # 3. KIS API 실시간 잔고 검증 엔진 (Audit) 및 핀셋 디버거
 # ==========================================
+import pandas as pd
+import time
+from datetime import datetime
+import requests
+import streamlit as st
+
+# ==========================================
+# 1. 잔고 전체 조회 엔진 (기존 audit_realtime_balance 대체)
+# ==========================================
 def audit_realtime_balance():
-    st.toast("📡 한투 서버와 실시간으로 잔고를 대조합니다...", icon="🧪")
+    st.subheader("🏦 KIS 실시간 잔고 전체 조회 (CTRP6504R)")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -310,222 +319,55 @@ def audit_realtime_balance():
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
-
-    url_stock = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
-    headers_stock = api_manager._get_common_headers("CTRP6504R")
-    params_stock = {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
-    res_stock = requests.get(url_stock, headers=headers_stock, params=params_stock)
+    headers = api_manager._get_common_headers("CTRP6504R")
+    url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
     
-    url_cash = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/foreign-margin"
-    headers_cash = api_manager._get_common_headers("TTTC2101R")
-    params_cash = {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "TR_CRCY_CD": ""}
-    res_cash = requests.get(url_cash, headers=headers_cash, params=params_cash)
-
-    df_ledger = load_ledger()
-    ledger_calc = calculate_reservoir_engine(df_ledger)
-    my_portfolio = build_portfolio(ledger_calc)
-    my_usd = ledger_calc.iloc[-1]['Cash_USD'] if not ledger_calc.empty else 0.0
-
-    kis_usd = 0.0
-    kis_portfolio = {}
-    
-    if res_cash.status_code == 200:
-        for item in res_cash.json().get("output2", []):
-            if item.get("crcy_cd") == "USD":
-                kis_usd = float(item.get("frcr_dncl_amt_2", 0))
-                
-    if res_stock.status_code == 200:
-        for item in res_stock.json().get("output1", []):
-            tk = item.get("pdno", "")
-            qty = float(item.get("cblc_qty13", 0))
-            if tk and qty > 0:
-                kis_portfolio[tk] = qty
-
-    st.subheader("🕵️‍♂️ 회계 감사 (Audit) 결과")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**💰 달러(USD) 예수금 대조**")
-        diff_usd = my_usd - kis_usd
-        st.write(f"우리 DB 계산: $ {my_usd:,.2f}")
-        st.write(f"한투 실제잔고: $ {kis_usd:,.2f}")
-        if abs(diff_usd) < 0.1: st.success("오차 없음 (Perfect!)")
-        else: st.error(f"오차 발생: $ {diff_usd:,.2f} (카톡 알림 누락분 확인 요망)")
-
-    with col2:
-        st.markdown("**📦 보유 주식 수량 대조**")
-        all_tickers = set(list(my_portfolio.keys()) + list(kis_portfolio.keys()))
-        for tk in all_tickers:
-            my_qty = my_portfolio.get(tk, {}).get('Qty', 0)
-            kis_qty = kis_portfolio.get(tk, 0)
-            diff_qty = my_qty - kis_qty
-            
-            st.write(f"- **{tk}** | DB: {my_qty:,.2f}주 vs 한투: {kis_qty:,.2f}주")
-            if abs(diff_qty) > 0.0001:
-                st.caption(f"  👉 수량 차이: {diff_qty:+.4f}주")
-    st.divider()
-
-
-# 🔴 [기사회생] 엑셀 문서 스펙 100% 완벽 적용 통합 테스트
-def run_precision_test():
-    st.toast("🚨 엑셀 문서 스펙 100% 적용 통합 테스트를 시작합니다...", icon="🚨")
-    try:
-        app_key = st.secrets["kis_api"]["APP_KEY"]
-        app_secret = st.secrets["kis_api"]["APP_SECRET"]
-        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
-    except Exception:
-        st.error("secrets.toml 에러: KIS 키값이 없습니다.")
-        return
-
-    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: 
-        st.error("토큰 발급 실패")
-        return
-
-    cano = api_manager.account_no[:8]
-    acnt_cd = api_manager.account_no[8:]
-    
-    # HTS 6/1 결제일 및 시차 포괄
-    start_dt = "20260527"
-    end_dt = "20260605"
-    
-    st.warning("🚨 [API 스펙 완전 일치 검증 테스트]")
-
-    # ==========================================
-    # 1. CTOS4001R (해외주식 일별거래내역)
-    # ==========================================
-    headers_ctos = api_manager._get_common_headers("CTOS4001R")
-    url_ctos = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
-    
-    # 엑셀 문서 기준 완벽한 파라미터 세팅
-    params_ctos = {
-        "CANO": cano,
-        "ACNT_PRDT_CD": acnt_cd,
-        "ERLM_STRT_DT": start_dt,
-        "ERLM_END_DT": end_dt,
-        "OVRS_EXCG_CD": "",        # 문서 기준: 무조건 공백
-        "PDNO": "",                # 문서 기준: 전체조회는 공백
-        "SLL_BUY_DVSN_CD": "00",   # 문서 기준: 전체(00) 필수
-        "LOAN_DVSN_CD": "",        # 문서 기준: 무조건 공백 필수
-        "CTX_AREA_FK100": "",
-        "CTX_AREA_NK100": ""
-    }
-    
-    try:
-        res_ctos = requests.get(url_ctos, headers=headers_ctos, params=params_ctos, timeout=20)
-        json_ctos = res_ctos.json()
-        
-        if json_ctos.get("output1"):
-            st.success(f"✅ [CTOS4001R] 드디어 데이터가 쏟아집니다!! (총 {len(json_ctos['output1'])}건)")
-        else:
-            st.error(f"❌ [CTOS4001R] 데이터 없음 | {json_ctos.get('msg_cd')}: {json_ctos.get('msg1')}")
-            
-        with st.expander("응답 상세 보기 [CTOS4001R]"):
-            st.write("**Params:**", params_ctos)
-            st.json(json_ctos)
-    except Exception as e:
-        st.error(f"CTOS4001R 요청 실패: {e}")
-
-    # ==========================================
-    # 2. TTTS3035R (해외주식 주문체결내역)
-    # ==========================================
-    headers_ttts = api_manager._get_common_headers("TTTS3035R")
-    url_ttts = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-    
-    # 엑셀 문서 기준 완벽한 파라미터 세팅
-    params_ttts = {
-        "CANO": cano,
-        "ACNT_PRDT_CD": acnt_cd,
-        "PDNO": "%",               # 문서 기준: 전체조회는 "%" (공백 아님)
-        "ORD_STRT_DT": start_dt,
-        "ORD_END_DT": end_dt,
-        "SLL_BUY_DVSN": "00",      # 🚨 주의: 끝에 _CD가 없음!
-        "CCLD_NCCS_DVSN": "00",    # 전체(00)
-        "OVRS_EXCG_CD": "%",       # 문서 기준: 전체조회는 "%"
-        "SORT_SQN": "DS",          # 정순
-        "ORD_DT": "",              # Null 필수
-        "ORD_GNO_BRNO": "",        # 🚨 주의: 새로 추가된 필수 필드 (Null)
-        "ODNO": "",                # 🚨 주의: 새로 추가된 필수 필드 (Null)
-        "CTX_AREA_FK200": "",
-        "CTX_AREA_NK200": ""
-    }
-    
-    try:
-        res_ttts = requests.get(url_ttts, headers=headers_ttts, params=params_ttts, timeout=20)
-        json_ttts = res_ttts.json()
-        
-        output_ttts = json_ttts.get("output", [])
-        if isinstance(output_ttts, list) and len(output_ttts) > 0:
-            st.success(f"✅ [TTTS3035R] 드디어 데이터가 쏟아집니다!! (총 {len(output_ttts)}건)")
-        else:
-            st.error(f"❌ [TTTS3035R] 데이터 없음 | {json_ttts.get('msg_cd')}: {json_ttts.get('msg1')}")
-            
-        with st.expander("응답 상세 보기 [TTTS3035R]"):
-            st.write("**Params:**", params_ttts)
-            st.json(json_ttts)
-    except Exception as e:
-        st.error(f"TTTS3035R 요청 실패: {e}")
-
-
-
-import pandas as pd
-from datetime import datetime
-import time
-
-# 🔴 [데이터 대통합 스캐너] 잔고 및 기간별 거래내역 전체 조회
-def run_full_api_exploration():
-    st.title("📊 한투 API 전체 데이터 스캐너")
-    st.caption("잔고 현황과 모든 체결 내역을 한눈에 파악하여 DB 구조를 기획하기 위한 임시 엔진입니다.")
-    
-    try:
-        app_key = st.secrets["kis_api"]["APP_KEY"]
-        app_secret = st.secrets["kis_api"]["APP_SECRET"]
-        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
-    except Exception:
-        st.error("secrets.toml 에러: KIS 키값이 없습니다.")
-        return
-
-    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: 
-        st.error("토큰 발급 실패")
-        return
-
-    cano = api_manager.account_no[:8]
-    acnt_cd = api_manager.account_no[8:]
-    
-    # ==========================================
-    # 1. 현재 잔고 전체 조회 (CTRP6504R)
-    # ==========================================
-    st.subheader("🏦 1. 현재 보유 잔고 (CTRP6504R)")
-    headers_bal = api_manager._get_common_headers("CTRP6504R")
-    url_bal = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
-    params_bal = {
+    params = {
         "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
         "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "000", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
     }
+    
     try:
-        res_bal = requests.get(url_bal, headers=headers_bal, params=params_bal)
-        json_bal = res_bal.json()
-        output_bal = json_bal.get("output3", [])
-        if output_bal:
-            df_bal = pd.DataFrame(output_bal)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        json_data = res.json()
+        
+        output3 = json_data.get("output3", [])
+        if output3:
+            df_bal = pd.DataFrame(output3)
+            st.success(f"✅ 총 {len(df_bal)}건의 보유 종목 잔고를 불러왔습니다.")
             st.dataframe(df_bal, use_container_width=True)
         else:
             st.info("조회된 잔고가 없습니다.")
     except Exception as e:
         st.error(f"잔고 조회 실패: {e}")
 
-    # ==========================================
-    # 2. 거래내역 전체 조회 (CTOS4001R) - 2025.12.30 ~ 오늘
-    # ==========================================
-    st.subheader("📜 2. 전체 매매 내역 (CTOS4001R)")
-    headers_trans = api_manager._get_common_headers("CTOS4001R")
-    url_trans = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+# ==========================================
+# 2. 거래내역 전체 조회 엔진 (기존 run_precision_test 대체)
+# ==========================================
+def run_precision_test():
+    st.subheader("📜 KIS 전체 매매내역 스캐너 (2025.12.30 ~ 현재)")
+    try:
+        app_key = st.secrets["kis_api"]["APP_KEY"]
+        app_secret = st.secrets["kis_api"]["APP_SECRET"]
+        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
+    except Exception:
+        st.error("secrets.toml 에러: KIS 키값이 없습니다.")
+        return
+
+    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
+    if not api_manager.token: return
+
+    cano = api_manager.account_no[:8]
+    acnt_cd = api_manager.account_no[8:]
     
     start_dt = "20251230"
     end_dt = datetime.now().strftime("%Y%m%d")
     
-    params_trans = {
+    # --- 1) 일별거래내역 (CTOS4001R) ---
+    st.markdown("#### 1. 해외주식 일별거래내역 (CTOS4001R)")
+    headers_ctos = api_manager._get_common_headers("CTOS4001R")
+    url_ctos = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+    params_ctos = {
         "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
         "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt,
         "OVRS_EXCG_CD": "", "PDNO": "", 
@@ -533,42 +375,65 @@ def run_full_api_exploration():
         "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
     }
     
-    all_trades = []
-    
-    with st.spinner("과거 거래내역을 모두 긁어오는 중입니다..."):
+    all_ctos = []
+    with st.spinner("CTOS4001R 데이터 수집 중..."):
         while True:
-            res_trans = requests.get(url_trans, headers=headers_trans, params=params_trans)
-            json_trans = res_trans.json()
-            trades = json_trans.get("output1", [])
+            res = requests.get(url_ctos, headers=headers_ctos, params=params_ctos)
+            j = res.json()
+            if j.get("output1"):
+                all_ctos.extend(j["output1"])
             
-            if trades:
-                all_trades.extend(trades)
-                
-            # 연속 조회가 필요한 경우 (tr_cont == 'M' or 'F')
-            tr_cont = res_trans.headers.get("tr_cont", "")
+            # 다음 페이지가 있는지 확인 (페이징 처리)
+            tr_cont = res.headers.get("tr_cont", "")
             if tr_cont in ["F", "M"]:
-                params_trans["CTX_AREA_FK100"] = json_trans.get("ctx_area_fk100", "")
-                params_trans["CTX_AREA_NK100"] = json_trans.get("ctx_area_nk100", "")
-                time.sleep(0.2) # API 호출 제한(Rate Limit) 방지
+                params_ctos["CTX_AREA_FK100"] = j.get("ctx_area_fk100", "")
+                params_ctos["CTX_AREA_NK100"] = j.get("ctx_area_nk100", "")
+                time.sleep(0.2)
             else:
                 break
                 
-    if all_trades:
-        df_trades = pd.DataFrame(all_trades)
-        # 가독성을 위해 최신순으로 정렬
-        df_trades = df_trades.sort_values(by=["trad_dt"], ascending=False).reset_index(drop=True)
-        st.success(f"총 {len(df_trades)}건의 거래내역을 성공적으로 불러왔습니다!")
-        st.dataframe(df_trades, use_container_width=True)
-        
-        # 원본 JSON 구조 확인용 (컬럼 파악용)
-        with st.expander("JSON 원본 스키마 분석용 (첫 번째 데이터)"):
-            st.json(all_trades[0])
+    if all_ctos:
+        df_ctos = pd.DataFrame(all_ctos)
+        st.success(f"✅ CTOS4001R 총 {len(df_ctos)}건 수집 완료")
+        st.dataframe(df_ctos, use_container_width=True)
     else:
-        st.error("거래 내역이 조회되지 않았습니다.")
+        st.info("CTOS4001R 내역이 없습니다.")
 
-
-
-
+    # --- 2) 주문체결내역 (TTTS3035R) ---
+    st.markdown("#### 2. 해외주식 주문체결내역 (TTTS3035R)")
+    headers_ttts = api_manager._get_common_headers("TTTS3035R")
+    url_ttts = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+    params_ttts = {
+        "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
+        "PDNO": "%", "ORD_STRT_DT": start_dt, "ORD_END_DT": end_dt,
+        "SLL_BUY_DVSN": "00", "CCLD_NCCS_DVSN": "00", "OVRS_EXCG_CD": "%",
+        "SORT_SQN": "DS", "ORD_DT": "", "ORD_GNO_BRNO": "", "ODNO": "",
+        "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+    }
+    
+    all_ttts = []
+    with st.spinner("TTTS3035R 데이터 수집 중..."):
+        while True:
+            res = requests.get(url_ttts, headers=headers_ttts, params=params_ttts)
+            j = res.json()
+            if j.get("output"):
+                all_ttts.extend(j["output"])
+            
+            # 다음 페이지가 있는지 확인 (페이징 처리)
+            tr_cont = res.headers.get("tr_cont", "")
+            if tr_cont in ["F", "M"]:
+                params_ttts["CTX_AREA_FK200"] = j.get("ctx_area_fk200", "")
+                params_ttts["CTX_AREA_NK200"] = j.get("ctx_area_nk200", "")
+                time.sleep(0.2)
+            else:
+                break
+                
+    if all_ttts:
+        df_ttts = pd.DataFrame(all_ttts)
+        st.success(f"✅ TTTS3035R 총 {len(df_ttts)}건 수집 완료")
+        st.dataframe(df_ttts, use_container_width=True)
+    else:
+        st.info("TTTS3035R 내역이 없습니다.")
 
 # ==========================================
 # 4. 포트폴리오 및 UI 렌더링 계층
