@@ -366,9 +366,9 @@ def audit_realtime_balance():
     st.divider()
 
 
-# 🔴 [최종 진단용] TTTS3035R (주문체결내역) 광역 탐색기
+# 🔴 [기사회생] 엑셀 문서 스펙 100% 완벽 적용 통합 테스트
 def run_precision_test():
-    st.toast("🕵️‍♂️ TTTS3035R (주문체결내역) 광역 탐색을 시작합니다...", icon="🔍")
+    st.toast("🚨 엑셀 문서 스펙 100% 적용 통합 테스트를 시작합니다...", icon="🚨")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -384,66 +384,88 @@ def run_precision_test():
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
-    headers = api_manager._get_common_headers("TTTS3035R")
-    url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-
-    # 🔴 카톡 알림(5/29) 및 HTS 결제일(6/1)을 완벽히 포괄하는 기간
+    
+    # HTS 6/1 결제일 및 시차 포괄
     start_dt = "20260527"
     end_dt = "20260605"
-
-    # 조합 구성: 전체종목(%) vs O(리얼티인컴) / 전체시장(%) vs NYSE(뉴욕) vs NASD(나스닥)
-    test_cases = [
-        {"name": "전체종목(%) + 전체시장(%)", "PDNO": "%", "EXCG_CD": "%"},
-        {"name": "전체종목(%) + NASD(나스닥)", "PDNO": "%", "EXCG_CD": "NASD"},
-        {"name": "리얼티인컴(O) + 전체시장(%)", "PDNO": "O", "EXCG_CD": "%"},
-        {"name": "리얼티인컴(O) + NYSE(뉴욕)", "PDNO": "O", "EXCG_CD": "NYSE"}
-    ]
-
-    st.warning(f"🕵️‍♂️ [TTTS3035R 조회 결과 ({start_dt} ~ {end_dt})]")
     
-    success_flag = False
+    st.warning("🚨 [API 스펙 완전 일치 검증 테스트]")
 
-    for case in test_cases:
-        params = {
-            "CANO": cano,
-            "ACNT_PRDT_CD": acnt_cd,
-            "PDNO": case["PDNO"],
-            "ORD_STRT_DT": start_dt,
-            "ORD_END_DT": end_dt,
-            "SLL_BUY_DVSN_CD": "00",  # 00: 전체 (매수/매도)
-            "CCLD_NCCS_DVSN": "00",   # 00: 전체 (체결/미체결)
-            "OVRS_EXCG_CD": case["EXCG_CD"],
-            "SORT_SQN": "DS",         # 내림차순
-            "ORD_DT": "",
-            "BRKR_ORD_SEQ": "",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-
-        try:
-            res = requests.get(url, headers=headers, params=params, timeout=20)
-            res_json = res.json()
-        except Exception as e:
-            st.error(f"❌ 요청 실패: {case['name']} / {e}")
-            continue
-
-        # 응답 데이터가 배열 형태(output)로 오는지 확인
-        output_data = res_json.get("output", [])
+    # ==========================================
+    # 1. CTOS4001R (해외주식 일별거래내역)
+    # ==========================================
+    headers_ctos = api_manager._get_common_headers("CTOS4001R")
+    url_ctos = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+    
+    # 엑셀 문서 기준 완벽한 파라미터 세팅
+    params_ctos = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_cd,
+        "ERLM_STRT_DT": start_dt,
+        "ERLM_END_DT": end_dt,
+        "OVRS_EXCG_CD": "",        # 문서 기준: 무조건 공백
+        "PDNO": "",                # 문서 기준: 전체조회는 공백
+        "SLL_BUY_DVSN_CD": "00",   # 문서 기준: 전체(00) 필수
+        "LOAN_DVSN_CD": "",        # 문서 기준: 무조건 공백 필수
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": ""
+    }
+    
+    try:
+        res_ctos = requests.get(url_ctos, headers=headers_ctos, params=params_ctos, timeout=20)
+        json_ctos = res_ctos.json()
         
-        if isinstance(output_data, list) and len(output_data) > 0:
-            st.success(f"✅ [{case['name']}] -> 데이터 발견!! (총 {len(output_data)}건)")
-            success_flag = True
+        if json_ctos.get("output1"):
+            st.success(f"✅ [CTOS4001R] 드디어 데이터가 쏟아집니다!! (총 {len(json_ctos['output1'])}건)")
         else:
-            msg_cd = res_json.get("msg_cd", "알수없음")
-            msg1 = res_json.get("msg1", "알수없음")
-            st.error(f"❌ [{case['name']}] -> 데이터 없음 | {msg_cd}: {msg1}")
+            st.error(f"❌ [CTOS4001R] 데이터 없음 | {json_ctos.get('msg_cd')}: {json_ctos.get('msg1')}")
             
-        with st.expander(f"응답 상세 보기 [{case['name']}]"):
-            st.write("**Params:**", params)
-            st.json(res_json)
+        with st.expander("응답 상세 보기 [CTOS4001R]"):
+            st.write("**Params:**", params_ctos)
+            st.json(json_ctos)
+    except Exception as e:
+        st.error(f"CTOS4001R 요청 실패: {e}")
 
-    if not success_flag:
-        st.info("💡 **CTOS4001R에 이어 TTTS3035R마저 모든 조합에서 실패했습니다. 이제 한투 측은 'API 선택 오류'나 '파라미터 오류'라는 변명을 절대 할 수 없습니다. 완벽한 체크메이트입니다.**")
+    # ==========================================
+    # 2. TTTS3035R (해외주식 주문체결내역)
+    # ==========================================
+    headers_ttts = api_manager._get_common_headers("TTTS3035R")
+    url_ttts = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+    
+    # 엑셀 문서 기준 완벽한 파라미터 세팅
+    params_ttts = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": acnt_cd,
+        "PDNO": "%",               # 문서 기준: 전체조회는 "%" (공백 아님)
+        "ORD_STRT_DT": start_dt,
+        "ORD_END_DT": end_dt,
+        "SLL_BUY_DVSN": "00",      # 🚨 주의: 끝에 _CD가 없음!
+        "CCLD_NCCS_DVSN": "00",    # 전체(00)
+        "OVRS_EXCG_CD": "%",       # 문서 기준: 전체조회는 "%"
+        "SORT_SQN": "DS",          # 정순
+        "ORD_DT": "",              # Null 필수
+        "ORD_GNO_BRNO": "",        # 🚨 주의: 새로 추가된 필수 필드 (Null)
+        "ODNO": "",                # 🚨 주의: 새로 추가된 필수 필드 (Null)
+        "CTX_AREA_FK200": "",
+        "CTX_AREA_NK200": ""
+    }
+    
+    try:
+        res_ttts = requests.get(url_ttts, headers=headers_ttts, params=params_ttts, timeout=20)
+        json_ttts = res_ttts.json()
+        
+        output_ttts = json_ttts.get("output", [])
+        if isinstance(output_ttts, list) and len(output_ttts) > 0:
+            st.success(f"✅ [TTTS3035R] 드디어 데이터가 쏟아집니다!! (총 {len(output_ttts)}건)")
+        else:
+            st.error(f"❌ [TTTS3035R] 데이터 없음 | {json_ttts.get('msg_cd')}: {json_ttts.get('msg1')}")
+            
+        with st.expander("응답 상세 보기 [TTTS3035R]"):
+            st.write("**Params:**", params_ttts)
+            st.json(json_ttts)
+    except Exception as e:
+        st.error(f"TTTS3035R 요청 실패: {e}")
+
 
 
 
