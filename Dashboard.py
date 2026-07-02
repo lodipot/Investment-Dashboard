@@ -567,9 +567,9 @@ def main():
     with col_btn2:
         st.write("")
         # 🔴 새로운 핀셋 테스트 버튼 부착
-        if st.button("🔍 5월 29일 핀셋 디버그 테스트", use_container_width=True):
-            run_precision_test()
-
+        if st.button("🔍 전체 원장 데이터 스캔 (잔고+내역)", use_container_width=True):
+            run_full_api_exploration()
+    
     st.write("")
 
     tab_view, tab_input = st.tabs(["📊 대시보드 뷰어", "📥 원장 관리 (자본 흐름 & 카톡 파싱)"])
