@@ -366,9 +366,9 @@ def audit_realtime_balance():
     st.divider()
 
 
-# 🔴 [최종 포렌식 증거 수집기] ERLM/INQR 및 넓은 날짜(6/5까지) 교차 검증
+# 🔴 [최종 진단용] TTTS3035R (주문체결내역) 광역 탐색기
 def run_precision_test():
-    st.toast("🕵️‍♂️ 한투 서버 제출용 포렌식 증거 수집을 시작합니다...", icon="🔍")
+    st.toast("🕵️‍♂️ TTTS3035R (주문체결내역) 광역 탐색을 시작합니다...", icon="🔍")
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
         app_secret = st.secrets["kis_api"]["APP_SECRET"]
@@ -384,47 +384,67 @@ def run_precision_test():
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
-    headers = api_manager._get_common_headers("CTOS4001R")
-    url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
+    headers = api_manager._get_common_headers("TTTS3035R")
+    url = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
 
-    # 🔴 핵심: 시차 및 HTS 반영일(6월 1일)을 덮기 위해 5/27 ~ 6/5 로 극단적으로 넓힘
+    # 🔴 카톡 알림(5/29) 및 HTS 결제일(6/1)을 완벽히 포괄하는 기간
     start_dt = "20260527"
     end_dt = "20260605"
 
+    # 조합 구성: 전체종목(%) vs O(리얼티인컴) / 전체시장(%) vs NYSE(뉴욕) vs NASD(나스닥)
     test_cases = [
-        {"name": "INQR + 전체시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "INQR_STRT_DT": start_dt, "INQR_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "00"}},
-        {"name": "INQR + 미국시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "INQR_STRT_DT": start_dt, "INQR_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "01"}},
-        {"name": "ERLM + 전체시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "00"}},
-        {"name": "ERLM + 미국시장", "params": {"CANO": cano, "ACNT_PRDT_CD": acnt_cd, "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt, "SHTN_PDNO": "", "ORD_ENX_DVSN_CD": "01"}}
+        {"name": "전체종목(%) + 전체시장(%)", "PDNO": "%", "EXCG_CD": "%"},
+        {"name": "전체종목(%) + NASD(나스닥)", "PDNO": "%", "EXCG_CD": "NASD"},
+        {"name": "리얼티인컴(O) + 전체시장(%)", "PDNO": "O", "EXCG_CD": "%"},
+        {"name": "리얼티인컴(O) + NYSE(뉴욕)", "PDNO": "O", "EXCG_CD": "NYSE"}
     ]
 
-    st.warning(f"🕵️‍♂️ [서버 원장 분리 증명용 테스트 결과 ({start_dt} ~ {end_dt})]")
+    st.warning(f"🕵️‍♂️ [TTTS3035R 조회 결과 ({start_dt} ~ {end_dt})]")
     
     success_flag = False
 
     for case in test_cases:
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_cd,
+            "PDNO": case["PDNO"],
+            "ORD_STRT_DT": start_dt,
+            "ORD_END_DT": end_dt,
+            "SLL_BUY_DVSN_CD": "00",  # 00: 전체 (매수/매도)
+            "CCLD_NCCS_DVSN": "00",   # 00: 전체 (체결/미체결)
+            "OVRS_EXCG_CD": case["EXCG_CD"],
+            "SORT_SQN": "DS",         # 내림차순
+            "ORD_DT": "",
+            "BRKR_ORD_SEQ": "",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+
         try:
-            res = requests.get(url, headers=headers, params=case["params"], timeout=20)
+            res = requests.get(url, headers=headers, params=params, timeout=20)
             res_json = res.json()
         except Exception as e:
             st.error(f"❌ 요청 실패: {case['name']} / {e}")
             continue
 
-        if res_json.get("output1"):
-            st.success(f"✅ [{case['name']}] -> 드디어 데이터 발견!!")
+        # 응답 데이터가 배열 형태(output)로 오는지 확인
+        output_data = res_json.get("output", [])
+        
+        if isinstance(output_data, list) and len(output_data) > 0:
+            st.success(f"✅ [{case['name']}] -> 데이터 발견!! (총 {len(output_data)}건)")
             success_flag = True
         else:
-            st.error(
-                f"❌ [{case['name']}] -> 데이터 없음 | "
-                f"ctx_area_fk100: {res_json.get('ctx_area_fk100', '없음')}"
-            )
+            msg_cd = res_json.get("msg_cd", "알수없음")
+            msg1 = res_json.get("msg1", "알수없음")
+            st.error(f"❌ [{case['name']}] -> 데이터 없음 | {msg_cd}: {msg1}")
             
         with st.expander(f"응답 상세 보기 [{case['name']}]"):
-            st.write("**Params:**", case["params"])
+            st.write("**Params:**", params)
             st.json(res_json)
 
     if not success_flag:
-        st.info("💡 **모든 조합에서 실패했습니다. 이는 파라미터 문제가 아니라, 한투 CTOS4001R API가 해당 계좌의 거래 원장을 읽지 못하는 서버 구조적 한계임을 완벽히 증명합니다. 문의글을 올려주세요!**")
+        st.info("💡 **CTOS4001R에 이어 TTTS3035R마저 모든 조합에서 실패했습니다. 이제 한투 측은 'API 선택 오류'나 '파라미터 오류'라는 변명을 절대 할 수 없습니다. 완벽한 체크메이트입니다.**")
+
 
 
 
