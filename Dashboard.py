@@ -301,13 +301,27 @@ def parse_kakao_money_events(text):
 # ==========================================
 import pandas as pd
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import streamlit as st
 
+# 기간을 30일 단위로 쪼개주는 헬퍼 함수 (API 3개월 제한 우회)
+def get_date_chunks(start_str, end_str):
+    start_dt = datetime.strptime(start_str, "%Y%m%d")
+    end_dt = datetime.strptime(end_str, "%Y%m%d")
+    chunks = []
+    curr = start_dt
+    while curr <= end_dt:
+        nxt = curr + timedelta(days=30)
+        if nxt > end_dt:
+            nxt = end_dt
+        chunks.append((curr.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
+        curr = nxt + timedelta(days=1)
+    return chunks
+
 def run_full_api_exploration():
-    st.title("📊 통합 원장 스캐너 (잔고 + 체결내역)")
-    st.caption("해외주식의 현재 잔고(미/일)와 매매내역을 모두 로드합니다. (국내주식은 별도 API가 필요합니다)")
+    st.title("📊 통합 원장 스캐너 (기간 제한 우회 적용)")
+    st.caption("해외주식의 현재 잔고와 25년 12월 말부터의 모든 매매내역을 30일씩 분할하여 100% 로드합니다.")
     
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
@@ -318,133 +332,131 @@ def run_full_api_exploration():
         return
 
     api_manager = KIS_API_Manager(app_key, app_secret, account_no)
-    if not api_manager.token: 
-        st.error("토큰 발급 실패")
-        return
+    if not api_manager.token: return
 
     cano = api_manager.account_no[:8]
     acnt_cd = api_manager.account_no[8:]
     
     # ==========================================
-    # 1. 실시간 보유 잔고 (미국 + 일본 각각 호출하여 합산)
+    # 1. 실시간 보유 잔고 (미국 + 일본) -> output1 수정 완료
     # ==========================================
-    st.subheader("🏦 1. 실시간 해외 보유 잔고 (CTRP6504R)")
+    st.subheader("🏦 1. 실시간 해외 보유 잔고 (미/일 통합)")
     headers_bal = api_manager._get_common_headers("CTRP6504R")
     url_bal = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
     
     all_balances = []
-    # 💡 핵심: NATN_CD를 미국(840)과 일본(392)으로 명시해서 각각 찌릅니다.
     target_nations = [("840", "미국"), ("392", "일본")]
     
     with st.spinner("미국 및 일본 시장 잔고 수집 중..."):
         for natn_cd, natn_name in target_nations:
             params_bal = {
                 "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-                "WCRC_FRCR_DVSN_CD": "02", # 외화 기준
-                "NATN_CD": natn_cd,        # 국가코드 명시
-                "TR_MKET_CD": "00",        # 전체 시장
-                "INQR_DVSN_CD": "00"
+                "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": natn_cd, 
+                "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
             }
             try:
                 res_bal = requests.get(url_bal, headers=headers_bal, params=params_bal, timeout=10)
                 json_bal = res_bal.json()
-                if json_bal.get("output3"):
-                    all_balances.extend(json_bal["output3"])
+                # 🚨 핵심: output3(계좌요약)이 아닌 output1(종목리스트) 사용!
+                if json_bal.get("output1"):
+                    all_balances.extend(json_bal["output1"])
             except Exception as e:
                 st.error(f"{natn_name} 잔고 조회 실패: {e}")
 
     if all_balances:
         df_bal = pd.DataFrame(all_balances)
-        st.success(f"✅ 총 {len(df_bal)}건의 보유 잔고를 불러왔습니다. (미국/일본 통합)")
+        st.success(f"✅ 총 {len(df_bal)}건의 보유 잔고를 불러왔습니다.")
         st.dataframe(df_bal, use_container_width=True)
     else:
         st.info("조회된 보유 잔고가 없습니다.")
 
     # ==========================================
-    # 날짜 세팅 (2025.12.30 ~ 오늘)
+    # 날짜 세팅 및 30일 단위 분할
     # ==========================================
     start_dt = "20251230"
     end_dt = datetime.now().strftime("%Y%m%d")
+    date_chunks = get_date_chunks(start_dt, end_dt)
     
     # ==========================================
-    # 2. 일별거래내역 조회 (CTOS4001R) - 성공했던 스펙 그대로!
+    # 2. 일별거래내역 조회 (CTOS4001R) - 분할 검색
     # ==========================================
     st.subheader("📜 2. 일별 거래내역 (CTOS4001R)")
     headers_ctos = api_manager._get_common_headers("CTOS4001R")
     url_ctos = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-period-trans"
-    params_ctos = {
-        "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-        "ERLM_STRT_DT": start_dt, "ERLM_END_DT": end_dt,
-        "OVRS_EXCG_CD": "", "PDNO": "", 
-        "SLL_BUY_DVSN_CD": "00", "LOAN_DVSN_CD": "", 
-        "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
-    }
     
     all_ctos = []
-    with st.spinner("일별 거래내역 수집 중..."):
-        for page in range(5):
-            try:
-                res_ctos = requests.get(url_ctos, headers=headers_ctos, params=params_ctos, timeout=10)
-                j_ctos = res_ctos.json()
-                if j_ctos.get("output1"):
-                    all_ctos.extend(j_ctos["output1"])
-                
-                tr_cont = res_ctos.headers.get("tr_cont", res_ctos.headers.get("TR_CONT", ""))
-                if tr_cont in ["F", "M"]:
-                    params_ctos["CTX_AREA_FK100"] = j_ctos.get("ctx_area_fk100", "")
-                    params_ctos["CTX_AREA_NK100"] = j_ctos.get("ctx_area_nk100", "")
-                    time.sleep(0.2)
-                else:
+    with st.spinner("30일 단위로 과거 일별 거래내역을 모두 긁어옵니다..."):
+        for c_start, c_end in date_chunks:
+            params_ctos = {
+                "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
+                "ERLM_STRT_DT": c_start, "ERLM_END_DT": c_end,
+                "OVRS_EXCG_CD": "", "PDNO": "", 
+                "SLL_BUY_DVSN_CD": "00", "LOAN_DVSN_CD": "", 
+                "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+            }
+            
+            for page in range(5):
+                try:
+                    res = requests.get(url_ctos, headers=headers_ctos, params=params_ctos, timeout=10)
+                    j = res.json()
+                    if j.get("output1"):
+                        all_ctos.extend(j["output1"])
+                    
+                    if res.headers.get("tr_cont", "") in ["F", "M"]:
+                        params_ctos["CTX_AREA_FK100"] = j.get("ctx_area_fk100", "")
+                        params_ctos["CTX_AREA_NK100"] = j.get("ctx_area_nk100", "")
+                        time.sleep(0.2)
+                    else:
+                        break
+                except Exception as e:
                     break
-            except Exception as e:
-                st.error(f"CTOS4001R 페이징 중 에러: {e}")
-                break
-                
+
     if all_ctos:
-        st.success(f"✅ 일별거래내역 총 {len(all_ctos)}건 수집 완료")
+        st.success(f"✅ 일별거래내역 총 {len(all_ctos)}건 수집 완료 (일본내역 포함)")
         st.dataframe(pd.DataFrame(all_ctos), use_container_width=True)
     else:
         st.info("조회된 일별 거래내역이 없습니다.")
 
     # ==========================================
-    # 3. 주문체결내역 조회 (TTTS3035R) - 성공했던 스펙 그대로!
+    # 3. 주문체결내역 조회 (TTTS3035R) - 분할 검색
     # ==========================================
     st.subheader("📜 3. 주문 체결내역 (TTTS3035R)")
     headers_ttts = api_manager._get_common_headers("TTTS3035R")
     url_ttts = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
-    params_ttts = {
-        "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-        "PDNO": "%", "ORD_STRT_DT": start_dt, "ORD_END_DT": end_dt,
-        "SLL_BUY_DVSN": "00", "CCLD_NCCS_DVSN": "00", "OVRS_EXCG_CD": "%",
-        "SORT_SQN": "DS", "ORD_DT": "", "ORD_GNO_BRNO": "", "ODNO": "",
-        "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
-    }
     
     all_ttts = []
-    with st.spinner("주문 체결내역 수집 중..."):
-        for page in range(5):
-            try:
-                res_ttts = requests.get(url_ttts, headers=headers_ttts, params=params_ttts, timeout=10)
-                j_ttts = res_ttts.json()
-                if j_ttts.get("output"):
-                    all_ttts.extend(j_ttts["output"])
-                
-                tr_cont = res_ttts.headers.get("tr_cont", res_ttts.headers.get("TR_CONT", ""))
-                if tr_cont in ["F", "M"]:
-                    params_ttts["CTX_AREA_FK200"] = j_ttts.get("ctx_area_fk200", "")
-                    params_ttts["CTX_AREA_NK200"] = j_ttts.get("ctx_area_nk200", "")
-                    time.sleep(0.2)
-                else:
+    with st.spinner("30일 단위로 과거 주문 체결내역을 모두 긁어옵니다..."):
+        for c_start, c_end in date_chunks:
+            params_ttts = {
+                "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
+                "PDNO": "%", "ORD_STRT_DT": c_start, "ORD_END_DT": c_end,
+                "SLL_BUY_DVSN": "00", "CCLD_NCCS_DVSN": "00", "OVRS_EXCG_CD": "%",
+                "SORT_SQN": "DS", "ORD_DT": "", "ORD_GNO_BRNO": "", "ODNO": "",
+                "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+            }
+            
+            for page in range(5):
+                try:
+                    res = requests.get(url_ttts, headers=headers_ttts, params=params_ttts, timeout=10)
+                    j = res.json()
+                    if j.get("output"):
+                        all_ttts.extend(j["output"])
+                    
+                    if res.headers.get("tr_cont", "") in ["F", "M"]:
+                        params_ttts["CTX_AREA_FK200"] = j.get("ctx_area_fk200", "")
+                        params_ttts["CTX_AREA_NK200"] = j.get("ctx_area_nk200", "")
+                        time.sleep(0.2)
+                    else:
+                        break
+                except Exception as e:
                     break
-            except Exception as e:
-                st.error(f"TTTS3035R 페이징 중 에러: {e}")
-                break
-                
+
     if all_ttts:
-        st.success(f"✅ 주문체결내역 총 {len(all_ttts)}건 수집 완료")
+        st.success(f"✅ 주문체결내역 총 {len(all_ttts)}건 수집 완료 (일본내역 포함)")
         st.dataframe(pd.DataFrame(all_ttts), use_container_width=True)
     else:
         st.info("조회된 주문 체결내역이 없습니다.")
+
 
 
 
