@@ -458,6 +458,137 @@ def run_full_api_exploration():
         st.info("조회된 주문 체결내역이 없습니다.")
 
 
+import pandas as pd
+import time
+from datetime import datetime, timedelta
+import requests
+import streamlit as st
+
+def run_domestic_api_exploration():
+    st.title("📊 국내주식 통합 원장 스캐너")
+    st.caption("국내주식/ETF 잔고(실현손익 포함) 및 최근 3개월 매매내역을 로드합니다.")
+    
+    try:
+        app_key = st.secrets["kis_api"]["APP_KEY"]
+        app_secret = st.secrets["kis_api"]["APP_SECRET"]
+        account_no = st.secrets["kis_api"]["CANO"] + st.secrets["kis_api"]["ACNT_PRDT_CD"]
+    except Exception:
+        st.error("secrets.toml 에러: KIS 키값이 없습니다.")
+        return
+
+    api_manager = KIS_API_Manager(app_key, app_secret, account_no)
+    if not api_manager.token: 
+        st.error("토큰 발급 실패")
+        return
+
+    cano = api_manager.account_no[:8]
+    acnt_cd = api_manager.account_no[8:]
+    
+    # ==========================================
+    # 1. 국내주식 잔고 및 실현손익 (TTTC8494R)
+    # ==========================================
+    st.subheader("🏦 1. 국내주식 잔고 및 실현손익 (TTTC8494R)")
+    headers_bal = api_manager._get_common_headers("TTTC8494R")
+    url_bal = f"{api_manager.base_url}/uapi/domestic-stock/v1/trading/inquire-balance-rlz-pl"
+    
+    # 문서의 필수 파라미터 100% 적용
+    params_bal = {
+        "CANO": cano, 
+        "ACNT_PRDT_CD": acnt_cd,
+        "AFHR_FLPR_YN": "N",          # 시간외단일가여부 (N:기본값)
+        "OFL_YN": "",                 # 오프라인여부 (공란)
+        "INQR_DVSN": "00",            # 조회구분 (00: 전체)
+        "UNPR_DVSN": "01",            # 단가구분 (01: 기본값)
+        "FUND_STTL_ICLD_YN": "N",     # 펀드결제포함여부 (N:미포함)
+        "FNCG_AMT_AUTO_RDPT_YN": "N", # 융자금액자동상환여부 (N)
+        "PRCS_DVSN": "00",            # 처리구분 (00: 전일매매포함)
+        "COST_ICLD_YN": "Y",          # 비용포함여부 (Y: 수수료/세금 포함)
+        "CTX_AREA_FK100": "", 
+        "CTX_AREA_NK100": ""
+    }
+    
+    all_balances = []
+    try:
+        res_bal = requests.get(url_bal, headers=headers_bal, params=params_bal, timeout=10)
+        json_bal = res_bal.json()
+        if json_bal.get("output1"):
+            all_balances.extend(json_bal["output1"])
+    except Exception as e:
+        st.error(f"국내주식 잔고 조회 실패: {e}")
+
+    if all_balances:
+        df_bal = pd.DataFrame(all_balances)
+        st.success(f"✅ 총 {len(df_bal)}건의 보유 잔고를 불러왔습니다.")
+        st.dataframe(df_bal, use_container_width=True)
+    else:
+        st.info("조회된 보유 잔고가 없습니다.")
+        if 'json_bal' in locals():
+            with st.expander("API 원본 응답 로그 (디버깅용)"):
+                st.json(json_bal)
+
+    # ==========================================
+    # 날짜 세팅 (서버 에러 방지를 위해 최근 90일로 엄격히 제한)
+    # ==========================================
+    end_dt_obj = datetime.now()
+    start_dt_obj = end_dt_obj - timedelta(days=90)
+    start_dt = start_dt_obj.strftime("%Y%m%d")
+    end_dt = end_dt_obj.strftime("%Y%m%d")
+    
+    # ==========================================
+    # 2. 국내주식 일별주문체결조회 (TTTC0081R) - 최근 3개월
+    # ==========================================
+    st.subheader(f"📜 2. 최근 3개월 매매내역 (TTTC0081R, {start_dt} ~ {end_dt})")
+    headers_ord = api_manager._get_common_headers("TTTC0081R")
+    url_ord = f"{api_manager.base_url}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+    
+    # 문서의 촘촘한 빈칸 및 기본값 규칙 완벽 적용
+    params_ord = {
+        "CANO": cano, 
+        "ACNT_PRDT_CD": acnt_cd,
+        "INQR_STRT_DT": start_dt, 
+        "INQR_END_DT": end_dt,
+        "SLL_BUY_DVSN_CD": "00",  # 00: 전체
+        "PDNO": "",               # 공백: 전체종목
+        "ORD_GNO_BRNO": "",       # 공백: 전체
+        "ODNO": "",               # 공백: 전체
+        "CCLD_DVSN": "00",        # 00: 전체
+        "INQR_DVSN": "00",        # 00: 역순 (최신순)
+        "INQR_DVSN_1": "",        # 공백: 전체
+        "INQR_DVSN_3": "00",      # 00: 전체
+        "EXCG_ID_DVSN_CD": "ALL", # ALL: 전체
+        "CTX_AREA_FK100": "", 
+        "CTX_AREA_NK100": ""
+    }
+    
+    all_orders = []
+    with st.spinner("국내주식 체결내역 수집 중..."):
+        for page in range(5):
+            try:
+                res_ord = requests.get(url_ord, headers=headers_ord, params=params_ord, timeout=10)
+                j_ord = res_ord.json()
+                if j_ord.get("output1"):
+                    all_orders.extend(j_ord["output1"])
+                
+                tr_cont = res_ord.headers.get("tr_cont", res_ord.headers.get("TR_CONT", ""))
+                if tr_cont in ["F", "M"]:
+                    params_ord["CTX_AREA_FK100"] = j_ord.get("ctx_area_fk100", "")
+                    params_ord["CTX_AREA_NK100"] = j_ord.get("ctx_area_nk100", "")
+                    time.sleep(0.2)
+                else:
+                    break
+            except Exception as e:
+                st.error(f"TTTC0081R 페이징 중 에러: {e}")
+                break
+
+    if all_orders:
+        st.success(f"✅ 체결내역 총 {len(all_orders)}건 수집 완료")
+        st.dataframe(pd.DataFrame(all_orders), use_container_width=True)
+    else:
+        st.info("최근 3개월 내에 조회된 국내 체결내역이 없습니다.")
+        if 'j_ord' in locals():
+            with st.expander("API 원본 응답 로그 (디버깅용)"):
+                st.json(j_ord)
+
 
 
 # ==========================================
@@ -589,8 +720,8 @@ def main():
         st.title("🌊 Global Multi-Currency Reservoir")
     with col_btn1:
         st.write("")
-        if st.button("🧪 DB-한투 잔고 실시간 검증", use_container_width=True):
-            audit_realtime_balance()
+        if if st.button("🔍 국내주식 원장 데이터 스캔 (잔고+내역)", use_container_width=True):
+            run_domestic_api_exploration()
     with col_btn2:
         st.write("")
         # 🔴 새로운 핀셋 테스트 버튼 부착
