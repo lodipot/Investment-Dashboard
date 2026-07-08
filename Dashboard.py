@@ -307,7 +307,7 @@ import streamlit as st
 
 def run_full_api_exploration():
     st.title("📊 통합 원장 스캐너 (잔고 + 체결내역)")
-    st.caption("현재 잔고와 모든 매매내역을 한 화면에 완벽하게 로드합니다.")
+    st.caption("해외주식의 현재 잔고(미/일)와 매매내역을 모두 로드합니다. (국내주식은 별도 API가 필요합니다)")
     
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
@@ -326,39 +326,36 @@ def run_full_api_exploration():
     acnt_cd = api_manager.account_no[8:]
     
     # ==========================================
-    # 1. 실시간 보유 잔고 (CTRP6504R) - 미국 & 일본 병합
+    # 1. 실시간 보유 잔고 (미국 + 일본 각각 호출하여 합산)
     # ==========================================
-    st.subheader("🏦 1. 실시간 보유 잔고 (미국+일본 통합)")
+    st.subheader("🏦 1. 실시간 해외 보유 잔고 (CTRP6504R)")
     headers_bal = api_manager._get_common_headers("CTRP6504R")
     url_bal = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
     
     all_balances = []
-    # 💡 핵심: 해외주식 잔고는 국가별(통화별)로 따로 찔러서 합쳐야 합니다!
-    target_markets = [
-        ("NASD", "USD", "미국시장"), 
-        ("TKSE", "JPY", "일본시장")
-    ]
+    # 💡 핵심: NATN_CD를 미국(840)과 일본(392)으로 명시해서 각각 찌릅니다.
+    target_nations = [("840", "미국"), ("392", "일본")]
     
     with st.spinner("미국 및 일본 시장 잔고 수집 중..."):
-        for excg, crcy, m_name in target_markets:
+        for natn_cd, natn_name in target_nations:
             params_bal = {
                 "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-                "OVRS_EXCG_CD": excg, "TR_CRCY_CD": crcy,
-                "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+                "WCRC_FRCR_DVSN_CD": "02", # 외화 기준
+                "NATN_CD": natn_cd,        # 국가코드 명시
+                "TR_MKET_CD": "00",        # 전체 시장
+                "INQR_DVSN_CD": "00"
             }
             try:
                 res_bal = requests.get(url_bal, headers=headers_bal, params=params_bal, timeout=10)
                 json_bal = res_bal.json()
-                # output1이 보유 주식 리스트입니다.
-                if json_bal.get("output1"):
-                    all_balances.extend(json_bal["output1"])
+                if json_bal.get("output3"):
+                    all_balances.extend(json_bal["output3"])
             except Exception as e:
-                st.error(f"{m_name} 잔고 조회 실패: {e}")
+                st.error(f"{natn_name} 잔고 조회 실패: {e}")
 
     if all_balances:
         df_bal = pd.DataFrame(all_balances)
-        # 종목명, 수량, 평가금액 등 직관적인 컬럼만 앞쪽으로 재배치
-        st.success(f"✅ 총 {len(df_bal)}건의 보유 종목 잔고를 불러왔습니다. (미국+일본)")
+        st.success(f"✅ 총 {len(df_bal)}건의 보유 잔고를 불러왔습니다. (미국/일본 통합)")
         st.dataframe(df_bal, use_container_width=True)
     else:
         st.info("조회된 보유 잔고가 없습니다.")
@@ -370,7 +367,7 @@ def run_full_api_exploration():
     end_dt = datetime.now().strftime("%Y%m%d")
     
     # ==========================================
-    # 2. 일별거래내역 조회 (CTOS4001R)
+    # 2. 일별거래내역 조회 (CTOS4001R) - 성공했던 스펙 그대로!
     # ==========================================
     st.subheader("📜 2. 일별 거래내역 (CTOS4001R)")
     headers_ctos = api_manager._get_common_headers("CTOS4001R")
@@ -404,14 +401,13 @@ def run_full_api_exploration():
                 break
                 
     if all_ctos:
-        df_ctos = pd.DataFrame(all_ctos)
-        st.success(f"✅ 일별거래내역 총 {len(df_ctos)}건 수집 완료 (미국/일본 모두 포함)")
-        st.dataframe(df_ctos, use_container_width=True)
+        st.success(f"✅ 일별거래내역 총 {len(all_ctos)}건 수집 완료")
+        st.dataframe(pd.DataFrame(all_ctos), use_container_width=True)
     else:
         st.info("조회된 일별 거래내역이 없습니다.")
 
     # ==========================================
-    # 3. 주문체결내역 조회 (TTTS3035R)
+    # 3. 주문체결내역 조회 (TTTS3035R) - 성공했던 스펙 그대로!
     # ==========================================
     st.subheader("📜 3. 주문 체결내역 (TTTS3035R)")
     headers_ttts = api_manager._get_common_headers("TTTS3035R")
@@ -445,11 +441,11 @@ def run_full_api_exploration():
                 break
                 
     if all_ttts:
-        df_ttts = pd.DataFrame(all_ttts)
-        st.success(f"✅ 주문체결내역 총 {len(df_ttts)}건 수집 완료 (미국/일본 모두 포함)")
-        st.dataframe(df_ttts, use_container_width=True)
+        st.success(f"✅ 주문체결내역 총 {len(all_ttts)}건 수집 완료")
+        st.dataframe(pd.DataFrame(all_ttts), use_container_width=True)
     else:
         st.info("조회된 주문 체결내역이 없습니다.")
+
 
 
 # ==========================================
