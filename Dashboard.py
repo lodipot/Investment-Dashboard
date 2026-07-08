@@ -307,7 +307,7 @@ import streamlit as st
 
 def run_full_api_exploration():
     st.title("📊 통합 원장 스캐너 (잔고 + 체결내역)")
-    st.caption("현재 잔고와 모든 매매내역을 한 화면에 로드합니다.")
+    st.caption("현재 잔고와 모든 매매내역을 한 화면에 완벽하게 로드합니다.")
     
     try:
         app_key = st.secrets["kis_api"]["APP_KEY"]
@@ -326,26 +326,42 @@ def run_full_api_exploration():
     acnt_cd = api_manager.account_no[8:]
     
     # ==========================================
-    # 1. 현재 잔고 전체 조회 (CTRP6504R)
+    # 1. 실시간 보유 잔고 (CTRP6504R) - 미국 & 일본 병합
     # ==========================================
-    st.subheader("🏦 1. 실시간 보유 잔고 (CTRP6504R)")
+    st.subheader("🏦 1. 실시간 보유 잔고 (미국+일본 통합)")
     headers_bal = api_manager._get_common_headers("CTRP6504R")
     url_bal = f"{api_manager.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
-    params_bal = {
-        "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
-        "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "000", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"
-    }
     
-    try:
-        res_bal = requests.get(url_bal, headers=headers_bal, params=params_bal, timeout=10)
-        json_bal = res_bal.json()
-        output_bal = json_bal.get("output3", [])
-        if output_bal:
-            st.dataframe(pd.DataFrame(output_bal), use_container_width=True)
-        else:
-            st.info("조회된 보유 잔고가 없습니다.")
-    except Exception as e:
-        st.error(f"잔고 조회 실패: {e}")
+    all_balances = []
+    # 💡 핵심: 해외주식 잔고는 국가별(통화별)로 따로 찔러서 합쳐야 합니다!
+    target_markets = [
+        ("NASD", "USD", "미국시장"), 
+        ("TKSE", "JPY", "일본시장")
+    ]
+    
+    with st.spinner("미국 및 일본 시장 잔고 수집 중..."):
+        for excg, crcy, m_name in target_markets:
+            params_bal = {
+                "CANO": cano, "ACNT_PRDT_CD": acnt_cd,
+                "OVRS_EXCG_CD": excg, "TR_CRCY_CD": crcy,
+                "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+            }
+            try:
+                res_bal = requests.get(url_bal, headers=headers_bal, params=params_bal, timeout=10)
+                json_bal = res_bal.json()
+                # output1이 보유 주식 리스트입니다.
+                if json_bal.get("output1"):
+                    all_balances.extend(json_bal["output1"])
+            except Exception as e:
+                st.error(f"{m_name} 잔고 조회 실패: {e}")
+
+    if all_balances:
+        df_bal = pd.DataFrame(all_balances)
+        # 종목명, 수량, 평가금액 등 직관적인 컬럼만 앞쪽으로 재배치
+        st.success(f"✅ 총 {len(df_bal)}건의 보유 종목 잔고를 불러왔습니다. (미국+일본)")
+        st.dataframe(df_bal, use_container_width=True)
+    else:
+        st.info("조회된 보유 잔고가 없습니다.")
 
     # ==========================================
     # 날짜 세팅 (2025.12.30 ~ 오늘)
@@ -368,8 +384,7 @@ def run_full_api_exploration():
     }
     
     all_ctos = []
-    with st.spinner("CTOS4001R 수집 중..."):
-        # 무한루프 방지를 위해 최대 5페이지만 조회 (안전장치)
+    with st.spinner("일별 거래내역 수집 중..."):
         for page in range(5):
             try:
                 res_ctos = requests.get(url_ctos, headers=headers_ctos, params=params_ctos, timeout=10)
@@ -390,7 +405,7 @@ def run_full_api_exploration():
                 
     if all_ctos:
         df_ctos = pd.DataFrame(all_ctos)
-        st.success(f"✅ 일별거래내역 총 {len(df_ctos)}건 수집 완료")
+        st.success(f"✅ 일별거래내역 총 {len(df_ctos)}건 수집 완료 (미국/일본 모두 포함)")
         st.dataframe(df_ctos, use_container_width=True)
     else:
         st.info("조회된 일별 거래내역이 없습니다.")
@@ -410,8 +425,7 @@ def run_full_api_exploration():
     }
     
     all_ttts = []
-    with st.spinner("TTTS3035R 수집 중..."):
-        # 무한루프 방지를 위해 최대 5페이지만 조회
+    with st.spinner("주문 체결내역 수집 중..."):
         for page in range(5):
             try:
                 res_ttts = requests.get(url_ttts, headers=headers_ttts, params=params_ttts, timeout=10)
@@ -432,10 +446,11 @@ def run_full_api_exploration():
                 
     if all_ttts:
         df_ttts = pd.DataFrame(all_ttts)
-        st.success(f"✅ 주문체결내역 총 {len(df_ttts)}건 수집 완료")
+        st.success(f"✅ 주문체결내역 총 {len(df_ttts)}건 수집 완료 (미국/일본 모두 포함)")
         st.dataframe(df_ttts, use_container_width=True)
     else:
         st.info("조회된 주문 체결내역이 없습니다.")
+
 
 # ==========================================
 # 4. 포트폴리오 및 UI 렌더링 계층
