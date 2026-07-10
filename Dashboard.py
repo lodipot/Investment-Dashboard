@@ -589,8 +589,6 @@ def run_domestic_api_exploration():
             with st.expander("API 원본 응답 로그 (디버깅용)"):
                 st.json(j_ord)
 
-
-
 # ==========================================
 # 4. 포트폴리오 및 UI 렌더링 계층
 # ==========================================
@@ -720,8 +718,8 @@ def main():
         st.title("🌊 Global Multi-Currency Reservoir")
     with col_btn1:
         st.write("")
-        if if st.button("🔍 국내주식 원장 데이터 스캔 (잔고+내역)", use_container_width=True):
-         run_domestic_api_exploration()
+        if st.button("🔍 국내주식 원장 데이터 스캔 (잔고+내역)", use_container_width=True):
+            run_domestic_api_exploration()
     with col_btn2:
         st.write("")
         # 🔴 새로운 핀셋 테스트 버튼 부착
